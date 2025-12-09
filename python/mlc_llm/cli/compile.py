@@ -116,6 +116,23 @@ def main(argv):
         default=None,
         help=HELP["debug_dump"] + " (default: %(default)s)",
     )
+    # ---------- New KV quant flags ----------
+    parser.add_argument(
+        "--kv-quant",
+        type=str,
+        choices=["int8", "int4", "none"],
+        default=None,
+        help="KV cache quantization (int8/int4). Requires calibration for scales.",
+    )
+    parser.add_argument(
+        "--kv-quant-scheme",
+        type=str,
+        choices=["uniform", "per_token", "kvquant"],
+        default="uniform",
+        help="Quant scheme: uniform (single global scale), per_token (dynamic scales), kvquant (advanced non‑uniform).",
+    )
+    # --------------------------------------
+
     parsed = parser.parse_args(argv)
     target, build_func = detect_target_and_host(parsed.device, parsed.host)
     parsed.model_type = detect_model_type(parsed.model_type, parsed.model)
@@ -125,6 +142,11 @@ def main(argv):
     )
     with open(parsed.model, "r", encoding="utf-8") as config_file:
         config = json.load(config_file)
+
+    # Inject KV quant config into the model config
+    if parsed.kv_quant:
+        config["kv_quant"] = parsed.kv_quant
+        config["kv_quant_scheme"] = parsed.kv_quant_scheme
 
     compile(
         config=config,
