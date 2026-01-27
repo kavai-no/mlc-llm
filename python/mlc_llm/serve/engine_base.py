@@ -23,6 +23,7 @@ from mlc_llm.protocol.mlc_chat_config import MLCChatConfig
 from mlc_llm.serve import data, engine_utils
 from mlc_llm.serve.config import EngineConfig
 from mlc_llm.serve.event_trace_recorder import EventTraceRecorder
+from mlc_llm.serve.tool_parsers.abstract_tool_parser import ToolParserManager
 from mlc_llm.support import download_cache, logging
 from mlc_llm.support.auto_device import detect_device
 from mlc_llm.support.style import green
