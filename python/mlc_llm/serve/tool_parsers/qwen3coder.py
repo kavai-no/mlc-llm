@@ -8,18 +8,25 @@ from collections.abc import Sequence
 from typing import Any, List, Optional, Union
 
 import re
+from pydantic import BaseModel
 
 from mlc_llm.protocol.openai_api_protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
-    DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall,
-    ExtractedToolCallInformation,
+    ChatFunctionCall, ChatCompletionMessage,
+    ChatToolCall,
+    ChatTool,
     FunctionCall, ToolCall)
 from mlc_llm.serve.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from mlc_llm.tokenizers import AnyTokenizer
 from mlc_llm.support import logging
+
+# Define the missing ExtractedToolCallInformation class
+class ExtractedToolCallInformation(BaseModel):
+    tools_called: bool
+    tool_calls: List[ToolCall]
+    content: Optional[str]
 
 logger = logging.getLogger(__name__)
 
@@ -304,7 +311,7 @@ class Qwen3CoderToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> Union[ChatCompletionMessage, None]:
         # Store request for type conversion
         if not previous_text:
             self._reset_streaming_state()
@@ -328,10 +335,10 @@ class Qwen3CoderToolParser(ToolParser):
                             self.tool_call_end_token)
                     if open_calls == 0:
                         # Return empty delta message to allow finish_reason processing
-                        return DeltaMessage(content="")
+                        return ChatCompletionMessage(content="")
                 elif not self.is_tool_call_started and current_text:
                     # This is a regular content response that\'s now complete
-                    return DeltaMessage(content="")
+                    return ChatCompletionMessage(content="")
             return None
 
         # Update accumulated text
@@ -367,7 +374,7 @@ class Qwen3CoderToolParser(ToolParser):
                     content_before = delta_text[:delta_text.index(
                         self.tool_call_start_token)]
                     if content_before:
-                        return DeltaMessage(content=content_before)
+                        return ChatCompletionMessage(content=content_before)
                 return None
             else:
                 # Check if we\'re between tool calls - skip whitespace
@@ -376,7 +383,7 @@ class Qwen3CoderToolParser(ToolParser):
                     if delta_text.strip() == "":
                         return None
                 # Normal content, no tool call
-                return DeltaMessage(content=delta_text)
+                return ChatCompletionMessage(content=delta_text)
 
         # Check if we\'re between tool calls (waiting for next one)
         # Count tool calls we\'ve seen vs processed
@@ -437,11 +444,11 @@ class Qwen3CoderToolParser(ToolParser):
                         })
 
                     # Send header with function info
-                    return DeltaMessage(tool_calls=[
-                        DeltaToolCall(
+                    return ChatCompletionMessage(tool_calls=[
+                        ChatToolCall(
                             index=self.current_tool_index,
                             id=self.current_tool_id,
-                            function=DeltaFunctionCall(
+                            function=ChatFunctionCall(
                                 name=self.current_function_name, arguments=""),
                             type="function",
                         )
@@ -453,10 +460,10 @@ class Qwen3CoderToolParser(ToolParser):
             # Send opening brace if not sent yet
             if not self.json_started and self.parameter_prefix not in delta_text:
                 self.json_started = True
-                return DeltaMessage(tool_calls=[
-                    DeltaToolCall(
+                return ChatCompletionMessage(tool_calls=[
+                    ChatToolCall(
                         index=self.current_tool_index,
-                        function=DeltaFunctionCall(arguments="{"),
+                        function=ChatFunctionCall(arguments="{"),
                     )
                 ])
 
@@ -493,10 +500,10 @@ class Qwen3CoderToolParser(ToolParser):
                     except Exception:
                         pass  # Ignore parsing errors during streaming
 
-                result = DeltaMessage(tool_calls=[
-                    DeltaToolCall(
+                result = ChatCompletionMessage(tool_calls=[
+                    ChatToolCall(
                         index=self.current_tool_index,
-                        function=DeltaFunctionCall(arguments="}"),
+                        function=ChatFunctionCall(arguments="}"),
                     )
                 ])
 
@@ -597,10 +604,10 @@ class Qwen3CoderToolParser(ToolParser):
 
                             self.param_count += 1
 
-                            return DeltaMessage(tool_calls=[
-                                DeltaToolCall(
+                            return ChatCompletionMessage(tool_calls=[
+                                ChatToolCall(
                                     index=self.current_tool_index,
-                                    function=DeltaFunctionCall(
+                                    function=ChatFunctionCall(
                                         arguments=json_fragment),
                                 )
                             ])
@@ -648,10 +655,10 @@ class Qwen3CoderToolParser(ToolParser):
                     self.current_param_value = ""
 
                     # Just close the current parameter string
-                    return DeltaMessage(tool_calls=[
-                        DeltaToolCall(
+                    return ChatCompletionMessage(tool_calls=[
+                        ChatToolCall(
                             index=self.current_tool_index,
-                            function=DeltaFunctionCall(
+                            function=ChatFunctionCall(
                                 arguments='"'),  # Close the string quote
                         )
                     ])
@@ -679,10 +686,10 @@ class Qwen3CoderToolParser(ToolParser):
                         delta_escaped = full_escaped[len(prev_escaped):]
 
                         if delta_escaped:
-                            return DeltaMessage(tool_calls=[
-                                DeltaToolCall(
+                            return ChatCompletionMessage(tool_calls=[
+                                ChatToolCall(
                                     index=self.current_tool_index,
-                                    function=DeltaFunctionCall(
+                                    function=ChatFunctionCall(
                                         arguments=delta_escaped),
                                 )
                             ])
