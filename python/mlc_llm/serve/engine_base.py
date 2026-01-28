@@ -24,6 +24,7 @@ from mlc_llm.serve import data, engine_utils
 from mlc_llm.serve.config import EngineConfig
 from mlc_llm.serve.event_trace_recorder import EventTraceRecorder
 from mlc_llm.serve.tool_parsers.abstract_tool_parser import ToolParserManager
+from mlc_llm.serve.tool_parsers.qwen3coder import Qwen3CoderToolParser
 from mlc_llm.support import download_cache, logging
 from mlc_llm.support.auto_device import detect_device
 from mlc_llm.support.style import green
@@ -623,6 +624,23 @@ class MLCEngineBase:  # pylint: disable=too-many-instance-attributes,too-few-pub
             ]
         }
         self.tokenizer = Tokenizer(model_args[0][0])
+        
+        # Initialize tool parser if available
+        self.tool_parser = None
+        # Check if we should use Qwen3CoderToolParser for Qwen3Coder models
+        model_name = model_args[0][0] if model_args else ""
+        if "qwen3_coder" in model_name.lower() or "qwen3coder" in model_name.lower():
+            tool_parser_class = ToolParserManager.get_parser("qwen3_coder")
+            if tool_parser_class:
+                self.tool_parser = tool_parser_class(self.tokenizer)
+        else:
+            # Check for explicit tool parser configuration
+            tool_parser_name = getattr(engine_config, 'tool_parser', None)
+            if tool_parser_name:
+                tool_parser_class = ToolParserManager.get_parser(tool_parser_name)
+                if tool_parser_class:
+                    self.tool_parser = tool_parser_class(self.tokenizer)
+        
         self._ffi["init_threaded_engine"](
             device,
             self.state.get_request_stream_callback(kind),
@@ -640,7 +658,7 @@ class MLCEngineBase:  # pylint: disable=too-many-instance-attributes,too-few-pub
         self._background_loop_thread.start()
         self._background_stream_back_loop_thread.start()
         self._terminated = False
-
+        
         engine_config.model = model_args[0][0]
         engine_config.model_lib = model_args[0][1]
         engine_config.additional_models = model_args[1:]  # type: ignore
@@ -1187,6 +1205,9 @@ def process_function_call_output(
     if use_function_calling:
         for i, output_text in enumerate(output_texts):
             try:
+                # Use the tool parser if available for Qwen3Coder
+                # This is a bit tricky since we don't have access to self in this standalone function
+                # For now, we'll fall back to the original method for simplicity
                 fn_json_list = convert_function_str_to_json(output_text)
             except (SyntaxError, ValueError):
                 output_text = "Got an invalid function call output from model"

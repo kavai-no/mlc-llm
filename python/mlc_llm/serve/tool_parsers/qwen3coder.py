@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any, List, Optional, Union
 
-import regex as re
+import re
 
 from mlc_llm.protocol.openai_api_protocol import (
     ChatCompletionRequest,
@@ -591,9 +591,9 @@ class Qwen3CoderToolParser(ToolParser):
                                                           ensure_ascii=False)
 
                             if self.param_count == 0:
-                                json_fragment = f'"{self.current_param_name}": {serialized_value}\'
+                                json_fragment = f'"{self.current_param_name}": {serialized_value}'
                             else:
-                                json_fragment = f', "{self.current_param_name}": {serialized_value}\'
+                                json_fragment = f', "{self.current_param_name}": {serialized_value}'
 
                             self.param_count += 1
 
