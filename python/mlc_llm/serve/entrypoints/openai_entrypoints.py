@@ -333,8 +333,7 @@ async def request_chat_completion(
     use_function_calling, tool_calls_list = engine_base.process_function_call_output(
         output_texts, finish_reasons
     )
-
-    return engine_base.wrap_chat_completion_response(
+    resp = engine_base.wrap_chat_completion_response(
         request_id=request_id,
         model=request.model,
         output_texts=output_texts,
@@ -343,4 +342,6 @@ async def request_chat_completion(
         logprob_results=logprob_results,
         use_function_calling=use_function_calling,
         usage=request_final_usage,
-    )
+    ).model_dump()
+    print(resp)
+    return resp

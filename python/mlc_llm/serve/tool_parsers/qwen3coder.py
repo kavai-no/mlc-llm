@@ -12,21 +12,13 @@ from pydantic import BaseModel
 
 from mlc_llm.protocol.openai_api_protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
     ChatFunctionCall, ChatCompletionMessage,
-    ChatToolCall,
-    ChatTool,
-    FunctionCall, ToolCall)
+    ChatToolCall)
 from mlc_llm.serve.tool_parsers.abstract_tool_parser import (
-    ToolParser, ToolParserManager)
-from mlc_llm.tokenizers import AnyTokenizer
+    ToolParser, ToolParserManager, ExtractedToolCallInformation)
 from mlc_llm.support import logging
+from mlc_llm.tokenizers import Tokenizer
 
-# Define the missing ExtractedToolCallInformation class
-class ExtractedToolCallInformation(BaseModel):
-    tools_called: bool
-    tool_calls: List[ToolCall]
-    content: Optional[str]
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +26,7 @@ logger = logging.getLogger(__name__)
 @ToolParserManager.register_module("qwen3_coder")
 class Qwen3CoderToolParser(ToolParser):
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: Tokenizer):
         super().__init__(tokenizer)
 
         self.current_tool_name_sent: bool = False
@@ -75,10 +67,10 @@ class Qwen3CoderToolParser(ToolParser):
             self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
 
-        if self.tool_call_start_token_id is None or self.tool_call_end_token_id is None:
-            raise RuntimeError(
-                "Qwen3 XML Tool parser could not locate tool call start/end "
-                "tokens in the tokenizer!")
+        # if self.tool_call_start_token_id is None or self.tool_call_end_token_id is None:
+        #     raise RuntimeError(
+        #         "Qwen3 XML Tool parser could not locate tool call start/end "
+        #         "tokens in the tokenizer!")
 
         logger.info(
             f"MLC LLM Successfully import tool parser {self.__class__.__name__} !"
@@ -109,7 +101,7 @@ class Qwen3CoderToolParser(ToolParser):
 
     def _get_arguments_config(
             self, func_name: str,
-            tools: Optional[list[ChatCompletionToolsParam]]) -> dict:
+            tools: Optional[list]) -> dict:
         """Extract argument configuration for a function."""
         if tools is None:
             return {}
@@ -201,8 +193,8 @@ class Qwen3CoderToolParser(ToolParser):
 
     def _parse_xml_function_call(
             self, function_call_str: str,
-            tools: Optional[list[ChatCompletionToolsParam]]
-    ) -> Optional[ToolCall]:
+            tools: Optional[list]
+    ) -> Optional[ChatToolCall]:
 
         # Extract function name
         end_index = function_call_str.index(">")

@@ -7,18 +7,20 @@ from typing import Any, Dict, List, Optional, Union
 
 from mlc_llm.protocol.openai_api_protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
-    DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall,
-    ExtractedToolCallInformation,
-    FunctionCall, ToolCall)
-from mlc_llm.tokenizers import AnyTokenizer
+    ChatFunctionCall, ChatCompletionMessage,
+    ChatToolCall)
+from pydantic import BaseModel
+from mlc_llm.tokenizers import Tokenizer
 
+# Define the missing ExtractedToolCallInformation class
+class ExtractedToolCallInformation(BaseModel):
+    tools_called: bool
+    tool_calls: List[ChatToolCall]
+    content: Optional[str]
 
 class ToolParser(abc.ABC):
     """Abstract base class for tool parsers."""
-
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: Tokenizer):
         self.model_tokenizer = tokenizer
         self.vocab = tokenizer.vocab if hasattr(tokenizer, 'vocab') else {}
 
@@ -40,7 +42,7 @@ class ToolParser(abc.ABC):
         current_token_ids: List[int],
         delta_token_ids: List[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> Union[ChatCompletionMessage, None]:
         """Extract tool calls from streaming model output."""
 
     def __repr__(self) -> str:

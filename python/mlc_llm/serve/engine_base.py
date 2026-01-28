@@ -629,7 +629,7 @@ class MLCEngineBase:  # pylint: disable=too-many-instance-attributes,too-few-pub
         self.tool_parser = None
         # Check if we should use Qwen3CoderToolParser for Qwen3Coder models
         model_name = model_args[0][0] if model_args else ""
-        if "qwen3_coder" in model_name.lower() or "qwen3coder" in model_name.lower():
+        if "qwen3_coder" in model_name.lower() or "qwen3-coder" in model_name.lower() or "qwen3coder" in model_name.lower():
             tool_parser_class = ToolParserManager.get_parser("qwen3_coder")
             if tool_parser_class:
                 self.tool_parser = tool_parser_class(self.tokenizer)
