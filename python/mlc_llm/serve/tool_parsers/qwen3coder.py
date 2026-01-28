@@ -62,15 +62,41 @@ class Qwen3CoderToolParser(ToolParser):
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction.")
-
+        self.vocab = {
+            "<tool_call>": 151657,
+            "</tool_call>": 151658,
+        }
         self.tool_call_start_token_id = self.vocab.get(
             self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
 
-        # if self.tool_call_start_token_id is None or self.tool_call_end_token_id is None:
-        #     raise RuntimeError(
-        #         "Qwen3 XML Tool parser could not locate tool call start/end "
-        #         "tokens in the tokenizer!")
+        # Check if tokens are found in vocabulary
+        if self.tool_call_start_token_id is None or self.tool_call_end_token_id is None:
+            logger.warning(
+                f"Qwen3 XML Tool parser could not locate tool call start/end "
+                f"tokens in the tokenizer! Start token '{self.tool_call_start_token}' "
+                f"ID: {self.tool_call_start_token_id}, End token '{self.tool_call_end_token}' "
+                f"ID: {self.tool_call_end_token_id}")
+            # Try to find these tokens in a different way
+            # This is a fallback for when the tokens are not directly in the vocab
+            if self.tool_call_start_token_id is None:
+                # Try to find the token by its string representation
+                for token_id, token_str in self.vocab.items():
+                    if token_str == self.tool_call_start_token:
+                        self.tool_call_start_token_id = token_id
+                        break
+            if self.tool_call_end_token_id is None:
+                # Try to find the token by its string representation
+                for token_id, token_str in self.vocab.items():
+                    if token_str == self.tool_call_end_token:
+                        self.tool_call_end_token_id = token_id
+                        break
+
+        # If still not found, set to a default value to prevent crashes
+        if self.tool_call_start_token_id is None:
+            self.tool_call_start_token_id = 0
+        if self.tool_call_end_token_id is None:
+            self.tool_call_end_token_id = 0
 
         logger.info(
             f"MLC LLM Successfully import tool parser {self.__class__.__name__} !"
