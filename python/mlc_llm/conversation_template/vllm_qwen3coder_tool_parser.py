@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# IMPORTANT: This file belongs to vllm and is not intended to be used for anything else than porting it to mlc_llm. The majority of types and classes in this file are not supported by mlc_llm.
+
 import ast
 import json
 import uuid
