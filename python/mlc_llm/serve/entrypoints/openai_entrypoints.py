@@ -330,8 +330,12 @@ async def request_chat_completion(
                 logprob_results[choice.index] += choice.logprobs.content
 
     assert all(finish_reason is not None for finish_reason in finish_reasons)
+    
+    # Get the tool parser from async_engine if available
+    tool_parser = getattr(async_engine, 'tool_parser', None)
+    
     use_function_calling, tool_calls_list = engine_base.process_function_call_output(
-        output_texts, finish_reasons
+        output_texts, finish_reasons, tool_parser=tool_parser
     )
     resp = engine_base.wrap_chat_completion_response(
         request_id=request_id,

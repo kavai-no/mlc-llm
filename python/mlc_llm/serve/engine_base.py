@@ -412,6 +412,10 @@ class EngineState:
     sync_output_queue: queue.Queue = queue.Queue()
     sync_text_streamers: List[TextStreamer] = []
 
+    # Tool parser state tracking
+    async_tool_parser_states: Dict[str, Any] = {}  # request_id -> tool_parser_state
+    sync_tool_parser_states: Dict[str, Any] = {}  # request_id -> tool_parser_state
+
     def __init__(self, enable_tracing: bool) -> None:
         """Constructor."""
         if enable_tracing:
@@ -801,6 +805,7 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
     engine_state: EngineState,
     use_function_calling: bool,
     finish_reasons: List[Optional[str]],
+    tool_parser: Optional[Any] = None,
 ) -> Optional[openai_api_protocol.ChatCompletionStreamResponse]:
     """Process the delta outputs of a single request of ChatCompletion,
     convert the delta output to ChatCompletionStreamResponse and return.
@@ -871,13 +876,45 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
             engine_state.record_event(request_id, event="skip empty delta text")
             continue
 
+        # Use tool parser if available for streaming
+        if tool_parser is not None and use_function_calling:
+            # Get accumulated text from delta_output if available
+            current_text = getattr(delta_output, "accumulated_text", None) or ""
+            delta_text = delta_output.delta_text
+            
+            # Calculate previous text
+            previous_text = current_text[:-len(delta_text)] if len(delta_text) > 0 and len(current_text) >= len(delta_text) else ""
+            
+            # Call tool parser for streaming
+            tool_parser_result = tool_parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=delta_text,
+                previous_token_ids=getattr(delta_output, "delta_token_ids", []) or [],
+                current_token_ids=[],
+                delta_token_ids=getattr(delta_output, "delta_token_ids", []) or [],
+                request=request,
+            )
+            
+            if tool_parser_result is not None:
+                # Use the result from tool parser
+                delta_message = tool_parser_result
+            else:
+                # Fall back to default behavior
+                delta_message = openai_api_protocol.ChatCompletionMessage(
+                    content=delta_output.delta_text, role="assistant"
+                )
+        else:
+            # Default behavior without tool parser or not using function calling
+            delta_message = openai_api_protocol.ChatCompletionMessage(
+                content=delta_output.delta_text, role="assistant"
+            )
+        
         choices.append(
             openai_api_protocol.ChatCompletionStreamResponseChoice(
                 index=i,
                 finish_reason=finish_reasons[i],
-                delta=openai_api_protocol.ChatCompletionMessage(
-                    content=delta_output.delta_text, role="assistant"
-                ),
+                delta=delta_message,
                 logprobs=(
                     openai_api_protocol.LogProbs(
                         content=[
@@ -1193,26 +1230,37 @@ def convert_function_str_to_json(stringified_calls: str) -> List[Union[Dict, Non
 
 
 def process_function_call_output(
-    output_texts: List[str], finish_reasons: List[str]
+    output_texts: List[str],
+    finish_reasons: List[str],
+    tool_parser: Optional[Any] = None,
 ) -> Tuple[bool, List[List[openai_api_protocol.ChatToolCall]]]:
     """Process the potential function call results outputted by model,
     according to the finish reasons.
     Return whether the output has function call, and the list of tool calls.
+    
+    If a tool_parser is provided (e.g., Qwen3CoderToolParser), it will be used
+    to extract tool calls from XML format output. Otherwise, falls back to
+    the default AST-based parsing.
     """
     n = len(output_texts)
     tool_calls_list: List[List[openai_api_protocol.ChatToolCall]] = [[] for _ in range(n)]
     use_function_calling = any(finish_reason == "tool_calls" for finish_reason in finish_reasons)
+    
     if use_function_calling:
         for i, output_text in enumerate(output_texts):
             try:
-                # Use the tool parser if available for Qwen3Coder
-                # This is a bit tricky since we don't have access to self in this standalone function
-                # For now, we'll fall back to the original method for simplicity
+                # Use tool parser if available (for Qwen3Coder XML format)
+                if tool_parser is not None and hasattr(tool_parser, 'extract_tool_calls'):
+                    # Extract tool calls using the tool parser
+                    result = tool_parser.extract_tool_calls(output_text, request=None)
+                    if result.tools_called and result.tool_calls:
+                        tool_calls_list[i] = result.tool_calls
+                        continue
+                
+                # Fallback to default parsing for non-tool-parser cases or if tool parser fails
                 fn_json_list = convert_function_str_to_json(output_text)
-            except (SyntaxError, ValueError):
-                output_text = "Got an invalid function call output from model"
-                finish_reasons[i] = "error"
-            else:
+                
+                # Convert parsed JSON to ChatToolCall objects
                 tool_calls_list[i] = [
                     openai_api_protocol.ChatToolCall(
                         type="function",
@@ -1223,11 +1271,17 @@ def process_function_call_output(
                     for fn_json_obj in fn_json_list
                     if fn_json_obj is not None
                 ]
+                
+                # Validate that we got valid tool calls
                 if len(tool_calls_list[i]) == 0:
                     output_texts[i] = "Got an invalid function call output from model"
                     finish_reasons[i] = "error"
                 else:
                     finish_reasons[i] = "tool_calls"
+            except (SyntaxError, ValueError) as e:
+                output_texts[i] = f"Got an invalid function call output from model: {str(e)}"
+                finish_reasons[i] = "error"
+    
     return use_function_calling, tool_calls_list
 
 

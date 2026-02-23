@@ -1238,6 +1238,7 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                     self.state,
                     use_function_calling,
                     finish_reasons,
+                    tool_parser=self.tool_parser,
                 )
 
                 if response is not None:
@@ -1794,6 +1795,7 @@ class MLCEngine(engine_base.MLCEngineBase):
                 self.state,
                 use_function_calling,
                 finish_reasons,
+                tool_parser=self.tool_parser,
             )
             if response is not None:
                 yield response
