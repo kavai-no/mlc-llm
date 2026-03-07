@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the MLC LLM project
 """Qwen3 Coder tool parser for MLC LLM."""
 
-import ast
 import json
 import uuid
 from collections.abc import Sequence
@@ -303,36 +302,46 @@ class Qwen3CoderToolParser(ToolParser):
         delta_token_ids: List[int],
         request: ChatCompletionRequest,
     ) -> Union[ChatCompletionMessage, None]:
-        """Extract tool calls from streaming model output."""
-        self._reset_streaming_state()
+        """Extract tool calls from streaming model output.
 
-        # Check if we're entering a tool call
-        if self.tool_call_start_token_id in delta_token_ids:
+        This method maintains state across streaming calls to properly track
+        partial and complete tool calls during generation.
+        """
+        # Reset state only for new messages (no previous text)
+        if not previous_text:
+            self._reset_streaming_state()
+
+        # Check if we're entering a tool call via start token
+        if self.tool_call_start_token_id in delta_token_ids or \
+           self.tool_call_start_token in delta_text:
             self.is_tool_call_started = True
             self.current_tool_id += 1
 
-        if not self.is_tool_call_started:
-            return None
-
-        # Check if we're exiting a tool call
-        if self.tool_call_end_token_id in delta_token_ids:
+        # Check if we're exiting a tool call via end token
+        if self.tool_call_end_token_id in delta_token_ids or \
+           self.tool_call_end_token in delta_text:
             self.is_tool_call_started = False
             self.current_tool_name_sent = False
 
-        # Extract tool calls from the current text
-        if self.tool_call_start_token_id in current_token_ids:
-            # Extract content between start and end tokens
-            match = self.tool_call_complete_regex.search(current_text)
-            if match:
-                tool_call_content = match.group(1)
-                tool_call = self._parse_tool_call(tool_call_content)
-                if tool_call:
-                    return ChatCompletionMessage(
-                        role="assistant",
-                        content=None,
-                        tool_calls=[tool_call]
-                    )
+        # If not inside a tool call, return None (or content before tool calls)
+        if not self.is_tool_call_started:
+            return None
 
+        # Extract complete tool calls from current text
+        matches = list(self.tool_call_complete_regex.finditer(current_text))
+        if matches:
+            # Get the most recent complete tool call
+            latest_match = matches[-1]
+            tool_call_content = latest_match.group(1)
+            tool_call = self._parse_tool_call(tool_call_content)
+            if tool_call:
+                return ChatCompletionMessage(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[tool_call]
+                )
+
+        # Return None for partial/incomplete tool calls during streaming
         return None
 
     def __repr__(self) -> str:

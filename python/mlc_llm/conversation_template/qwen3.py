@@ -26,11 +26,6 @@ ConvTemplateRegistry.register_conv_template(
         system_template=f"<|im_start|>system\n{MessagePlaceholders.SYSTEM.value}<|im_end|>\n",
         system_message="""<|im_start|>system\n{system_message}\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{function_string}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>""",
         roles={"user": "<|im_start|>user", "assistant": "<|im_start|>assistant"},
-        role_templates={
-            "user": MessagePlaceholders.USER.value,
-            "assistant": MessagePlaceholders.ASSISTANT.value,
-            "tool": "{tool_message}"
-        },
         seps=["<|im_end|>\n"],
         role_content_sep="\n",
         role_empty_sep="\n",

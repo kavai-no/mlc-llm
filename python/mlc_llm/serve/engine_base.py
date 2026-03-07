@@ -890,8 +890,8 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
                 previous_text=previous_text,
                 current_text=current_text,
                 delta_text=delta_text,
-                previous_token_ids=getattr(delta_output, "delta_token_ids", []) or [],
-                current_token_ids=[],
+                previous_token_ids=getattr(delta_output, "previous_token_ids", []) or [],
+                current_token_ids=getattr(delta_output, "current_token_ids", []) or [],
                 delta_token_ids=getattr(delta_output, "delta_token_ids", []) or [],
                 request=request,
             )
@@ -1208,6 +1208,10 @@ def convert_function_str_to_json(stringified_calls: str) -> List[Union[Dict, Non
     """Convert a (possibly list) of function call string to a list of json objects.
     Return None for invalid function call string."""
 
+    # Handle empty input
+    if not stringified_calls or not stringified_calls.strip():
+        return []
+
     def parse_function_call(call_str: str):
         node = ast.parse(call_str, mode="eval")
         call_node = node.body
@@ -1220,6 +1224,7 @@ def convert_function_str_to_json(stringified_calls: str) -> List[Union[Dict, Non
         return None
 
     if (
+        len(stringified_calls) > 0 and
         stringified_calls[0] == "[" and stringified_calls[-1] == "]"
     ):  # hacky way to check if string list
         calls = ast.literal_eval(stringified_calls)
@@ -1278,7 +1283,7 @@ def process_function_call_output(
                     finish_reasons[i] = "error"
                 else:
                     finish_reasons[i] = "tool_calls"
-            except (SyntaxError, ValueError) as e:
+            except (SyntaxError, ValueError, IndexError, KeyError) as e:
                 output_texts[i] = f"Got an invalid function call output from model: {str(e)}"
                 finish_reasons[i] = "error"
     
