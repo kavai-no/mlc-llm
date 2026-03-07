@@ -1056,7 +1056,7 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
 
         assert all(finish_reason is not None for finish_reason in finish_reasons)
         use_function_calling, tool_calls_list = engine_base.process_function_call_output(
-            output_texts, finish_reasons
+            output_texts, finish_reasons, tool_parser=self.tool_parser
         )
         return engine_base.wrap_chat_completion_response(
             request_id=request_id,
@@ -1622,7 +1622,7 @@ class MLCEngine(engine_base.MLCEngineBase):
 
         assert all(finish_reason is not None for finish_reason in finish_reasons)
         use_function_calling, tool_calls_list = engine_base.process_function_call_output(
-            output_texts, finish_reasons
+            output_texts, finish_reasons, tool_parser=self.tool_parser
         )
         return engine_base.wrap_chat_completion_response(
             request_id=request_id,

@@ -389,7 +389,7 @@ class ChatCompletionRequest(BaseModel):
                     ]
                 ):
                     conv_template.use_function_calling = True
-                    conv_template.function_string = tool.function.model_dump_json(by_alias=True)
+                    conv_template.function_string = conv_template.render_tools([tool.function])
                     return
 
             # pylint: disable=unsubscriptable-object
@@ -409,7 +409,7 @@ class ChatCompletionRequest(BaseModel):
             function_list.append(tool.function.model_dump(by_alias=True))
 
         conv_template.use_function_calling = True
-        conv_template.function_string = json.dumps(function_list)
+        conv_template.function_string = conv_template.render_tools(self.tools)
 
 
 class ChatCompletionResponseChoice(BaseModel):

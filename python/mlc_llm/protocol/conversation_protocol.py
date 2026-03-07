@@ -5,6 +5,9 @@ from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 from pydantic import BaseModel, Field, field_validator
 
+from mlc_llm.serve.tool_parsers.abstract_tool_parser import (
+    ToolParser, ToolParserManager, ExtractedToolCallInformation)
+
 
 # The message placeholders in the message prompts according to roles.
 class MessagePlaceholders(Enum):
@@ -81,6 +84,7 @@ class Conversation(BaseModel):
     function_string: str = ""
     # whether using function calling or not, helps check for output message format in API call
     use_function_calling: bool = False
+    tool_parser: str = "default"
 
     def __init__(self, role_templates: Optional[Dict[str, str]] = None, **kwargs):
         # Defaults templates which would be overridden by model specific templates
@@ -109,6 +113,10 @@ class Conversation(BaseModel):
     def from_json_dict(cls: Type[T], json_dict: Dict[str, Any]) -> T:
         """Convert from a json dictionary"""
         return Conversation.model_validate(json_dict)
+
+    def render_tools(self, tools: Optional[List[ChatTool]]=None) -> str:
+        """Render tools to a string"""
+        ToolParserManager.get_parser(self.tool_parser).render_tools(tools)
 
     # pylint: disable=too-many-branches
     def as_prompt(self, config=None) -> List[Any]:
