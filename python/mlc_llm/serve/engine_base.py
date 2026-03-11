@@ -23,8 +23,7 @@ from mlc_llm.protocol.mlc_chat_config import MLCChatConfig
 from mlc_llm.serve import data, engine_utils
 from mlc_llm.serve.config import EngineConfig
 from mlc_llm.serve.event_trace_recorder import EventTraceRecorder
-from mlc_llm.serve.tool_parsers.abstract_tool_parser import ToolParserManager
-from mlc_llm.serve.tool_parsers.qwen3coder import Qwen3CoderToolParser
+from mlc_llm.serve.tool_parsers import ToolParserManager
 from mlc_llm.support import download_cache, logging
 from mlc_llm.support.auto_device import detect_device
 from mlc_llm.support.style import green
@@ -631,19 +630,12 @@ class MLCEngineBase:  # pylint: disable=too-many-instance-attributes,too-few-pub
         
         # Initialize tool parser if available
         self.tool_parser = None
-        # Check if we should use Qwen3CoderToolParser for Qwen3Coder models
-        model_name = model_args[0][0] if model_args else ""
-        if "qwen3_coder" in model_name.lower() or "qwen3-coder" in model_name.lower() or "qwen3coder" in model_name.lower():
-            tool_parser_class = ToolParserManager.get_parser("qwen3_coder")
+        # Check for explicit tool parser configuration
+        tool_parser_name = getattr(engine_config, 'tool_parser', None)
+        if tool_parser_name:
+            tool_parser_class = ToolParserManager.get_parser(tool_parser_name)
             if tool_parser_class:
                 self.tool_parser = tool_parser_class(self.tokenizer)
-        else:
-            # Check for explicit tool parser configuration
-            tool_parser_name = getattr(engine_config, 'tool_parser', None)
-            if tool_parser_name:
-                tool_parser_class = ToolParserManager.get_parser(tool_parser_name)
-                if tool_parser_class:
-                    self.tool_parser = tool_parser_class(self.tokenizer)
         
         self._ffi["init_threaded_engine"](
             device,

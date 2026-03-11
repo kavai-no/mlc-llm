@@ -3,12 +3,13 @@
 """Qwen3 Coder tool parser for MLC LLM."""
 
 import json
+import re
 import uuid
 from collections.abc import Sequence
 from typing import Any, List, Optional, Union
 
-import re
-from pydantic import BaseModel
+import pydantic
+
 
 from mlc_llm.protocol.openai_api_protocol import (
     ChatCompletionRequest,
@@ -18,6 +19,9 @@ from mlc_llm.serve.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager, ExtractedToolCallInformation)
 from mlc_llm.support import logging
 from mlc_llm.tokenizers import Tokenizer
+
+# Alias pydantic for consistency with other parsers
+BaseModel = pydantic.BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +117,7 @@ class Qwen3CoderToolParser(ToolParser):
         logger.info(
             f"MLC LLM Successfully import tool parser {self.__class__.__name__} !")
 
-    def render_tools(self, tools: Optional[List[ChatToolCall]] = None) -> str:
+    def render_tools(self, tools: Optional["List[ChatTool]"] = None) -> str:
         """Render qwen3 coder xml tool definitions to string."""
         if tools is None or not tools:
             return ""
@@ -133,13 +137,13 @@ class Qwen3CoderToolParser(ToolParser):
 
             # Description
             if hasattr(tool, 'description') and tool.description:
-                rendered_output.append(f"<description>{tool.description.strip()}</description>\n")
+                rendered_output.append(f"<description>{func.description.strip()}</description>\n")
 
-            # Parameters
-            if hasattr(tool, 'parameters') and tool.parameters:
+            # Parameters (access through func since we extracted it above)  
+            if hasattr(func, 'parameters') and func.parameters:
                 rendered_output.append("<parameters>\n")
 
-                for param_name, param_fields in tool.parameters.items():
+                for param_name, param_fields in func.parameters.items():
                     rendered_output.append("\n<parameter>\n")
 
                     # Name
@@ -163,14 +167,14 @@ class Qwen3CoderToolParser(ToolParser):
 
                 # Extra keys for parameters (e.g., additionalProperties)
                 handled_keys = ['properties', 'type']
-                extra_keys = render_extra_keys(tool.parameters, handled_keys)
+                extra_keys = render_extra_keys(func.parameters, handled_keys)
                 rendered_output.append(extra_keys)
 
                 rendered_output.append("</parameters>\n")
 
-            # Extra keys for tool (e.g., externalDocs)
+            # Extra keys for tool wrapper (e.g., externalDocs) - already extracted func above  
             handled_keys = ['name', 'description', 'parameters']
-            extra_keys = render_extra_keys(tool, handled_keys)
+            extra_keys = render_extra_keys(func, handled_keys)
             rendered_output.append(extra_keys)
 
             # End function block

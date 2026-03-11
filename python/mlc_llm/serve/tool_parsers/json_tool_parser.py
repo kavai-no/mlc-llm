@@ -4,16 +4,16 @@
 
 import json
 import uuid
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import List, Optional, Union
+
 
 from mlc_llm.protocol.openai_api_protocol import (
     ChatCompletionRequest,
     ChatFunctionCall, ChatCompletionMessage,
-    ChatToolCall)
+    ChatTool, ChatToolCall)
 from mlc_llm.serve.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager, ExtractedToolCallInformation)
 from mlc_llm.tokenizers import Tokenizer
-
 
 @ToolParserManager.register_module("json")
 class JsonToolParser(ToolParser):
@@ -120,7 +120,7 @@ class JsonToolParser(ToolParser):
         
         return None
     
-    def render_tools(self, tools: Optional[List[ChatToolCall]] = None) -> str:
+    def render_tools(self, tools: Optional["List[ChatTool]"] = None) -> str:
         """Render tool definitions to string.
         
         Args:
@@ -156,7 +156,7 @@ class JsonToolParser(ToolParser):
                     rendered_output.append("<parameters>\n")
                     
                     for param_name, param_value in params.items():
-                        rendered_output.append(f"<parameter>\n")
+                        rendered_output.append("<parameter>\n")
                         rendered_output.append(f"<name>{param_name}</name>\n")
                         rendered_output.append(f"<value>{str(param_value)}</value>\n")
                         rendered_output.append("</parameter>\n")

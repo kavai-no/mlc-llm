@@ -3,14 +3,23 @@
 """Abstract tool parser base class for MLC LLM."""
 
 import abc
+import json
+import uuid
 from typing import Any, Dict, List, Optional, Union
+
+import pydantic
+
 
 from mlc_llm.protocol.openai_api_protocol import (
     ChatCompletionRequest,
     ChatFunctionCall, ChatCompletionMessage,
-    ChatToolCall)
-from pydantic import BaseModel
+    ChatTool, ChatToolCall)
 from mlc_llm.tokenizers import Tokenizer
+from .tool_parser_manager import ToolParserManager
+
+# Alias for consistency with other parsers
+BaseModel = pydantic.BaseModel
+
 
 # Define the missing ExtractedToolCallInformation class
 class ExtractedToolCallInformation(BaseModel):
@@ -46,7 +55,7 @@ class ToolParser(abc.ABC):
         """Extract tool calls from streaming model output."""
 
     @abc.abstractmethod
-    def render_tools(tools: Optional[List[ChatToolCall]]=None) -> str:
+    def render_tools(self, tools: "Optional[List[ChatTool]]" = None) -> str:
         """Render tool definitions to string."""
 
     def __repr__(self) -> str:
@@ -54,38 +63,13 @@ class ToolParser(abc.ABC):
 
     
 
-class ToolParserManager:
-    """Tool parser manager for registering and retrieving tool parsers."""
-
-    _parsers: Dict[str, type] = {}
-
-    @classmethod
-    def register_module(cls, name: str):
-        """Register a tool parser class."""
-        def decorator(tool_parser_class: type):
-            cls._parsers[name] = tool_parser_class
-            return tool_parser_class
-        return decorator
-
-    @classmethod
-    def get_parser(cls, name: str) -> type:
-        """Get a tool parser class by name."""
-        return cls._parsers.get(name)
-
-    @classmethod
-    def get_parser_names(cls) -> List[str]:
-        """Get all registered parser names."""
-        return list(cls._parsers.keys())
-
-
 @ToolParserManager.register_module("default")
 class DefaultToolParser(ToolParser):
     """Default tool parser."""
 
     def __init__(self, tokenizer: Tokenizer):
         """Initialize the tool parser."""
-        super().__init__()
-        self.tokenizer = tokenizer
+        super().__init__(tokenizer)
 
     def extract_tool_calls(
         self,
@@ -152,7 +136,7 @@ class DefaultToolParser(ToolParser):
             pass
         return None
 
-    def render_tools(self, tools: Optional[List[ChatToolCall]] = None) -> str:
+    def render_tools(self, tools: Optional[List["ChatTool"]] = None) -> str:
         """Render tool definitions to a JSON string."""
         if not tools or len(tools) == 0:
             return ""
@@ -166,4 +150,4 @@ class DefaultToolParser(ToolParser):
             rendered_output.append(f"```json\n{tool}\n```\n")
 
         return "".join(rendered_output)
-    
+

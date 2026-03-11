@@ -372,7 +372,8 @@ class ChatCompletionRequest(BaseModel):
         if self.tools is None or (isinstance(self.tool_choice, str) and self.tool_choice == "none"):
             conv_template.use_function_calling = False
             return
-
+        from mlc_llm.serve.tool_parsers import ToolParserManager
+        tool_parser = ToolParserManager.get_parser(conv_template.tool_parser)
         # select the tool based on the tool_choice if specified
         if isinstance(self.tool_choice, dict):
             if self.tool_choice["type"] != "function":  # pylint: disable=unsubscriptable-object
@@ -389,7 +390,7 @@ class ChatCompletionRequest(BaseModel):
                     ]
                 ):
                     conv_template.use_function_calling = True
-                    conv_template.function_string = conv_template.render_tools([tool.function])
+                    conv_template.function_string = tool_parser.render_tools([tool.function])
                     return
 
             # pylint: disable=unsubscriptable-object
@@ -409,7 +410,7 @@ class ChatCompletionRequest(BaseModel):
             function_list.append(tool.function.model_dump(by_alias=True))
 
         conv_template.use_function_calling = True
-        conv_template.function_string = conv_template.render_tools(self.tools)
+        conv_template.function_string = tool_parser.render_tools(self.tools)
 
 
 class ChatCompletionResponseChoice(BaseModel):
