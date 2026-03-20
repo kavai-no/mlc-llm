@@ -630,12 +630,18 @@ class MLCEngineBase:  # pylint: disable=too-many-instance-attributes,too-few-pub
         
         # Initialize tool parser if available
         self.tool_parser = None
-        # Check for explicit tool parser configuration
-        tool_parser_name = getattr(engine_config, 'tool_parser', None)
-        if tool_parser_name:
+        # Check for tool parser from conversation template first, then engine_config
+        tool_parser_name = getattr(self.conv_template, 'tool_parser', None) or getattr(engine_config, 'tool_parser', None)
+        if tool_parser_name and tool_parser_name != "default":
+            logger.info(f"Creating tool parser from template/config: {tool_parser_name}")
             tool_parser_class = ToolParserManager.get_parser(tool_parser_name)
             if tool_parser_class:
                 self.tool_parser = tool_parser_class(self.tokenizer)
+                logger.info(f"Successfully initialized tool parser: {self.tool_parser}")
+            else:
+                logger.warning(f"Could not find tool parser class: {tool_parser_name}")
+        else:
+            logger.debug(f"No tool_parser configured (template: {getattr(self.conv_template, 'tool_parser', None)}, config: {getattr(engine_config, 'tool_parser', None)})")
         
         self._ffi["init_threaded_engine"](
             device,
@@ -702,6 +708,7 @@ def process_chat_completion_request(  # pylint: disable=too-many-arguments
     f_tokenize: Callable[[str], List[int]],
     max_input_sequence_length: int,
     conv_template: Conversation,
+    tool_parser_instance: Optional[object] = None,
 ) -> Tuple[List[Union[List[int], data.Data]], GenerationConfig, bool, int]:
     """Process the given ChatCompletionRequest, apply request validity
     checks, and return the processed prompts, and other info.
@@ -754,7 +761,7 @@ def process_chat_completion_request(  # pylint: disable=too-many-arguments
     # iii. Add the additional message for the assistant.
     request.check_message_validity()
     # - Check for function calling usage and update the conversation template
-    request.check_function_call_usage(conv_template)
+    request.check_function_call_usage(conv_template, tool_parser_instance=tool_parser_instance)
 
     for message in request.messages:
         role = message.role
@@ -1239,19 +1246,23 @@ def process_function_call_output(
     to extract tool calls from XML format output. Otherwise, falls back to
     the default AST-based parsing.
     """
+    logger.info(f"process_function_call_output: tool_parser={tool_parser}, finish_reasons={finish_reasons}")
     n = len(output_texts)
     tool_calls_list: List[List[openai_api_protocol.ChatToolCall]] = [[] for _ in range(n)]
-    use_function_calling = any(finish_reason == "tool_calls" for finish_reason in finish_reasons)
+    use_function_calling = (tool_parser is not None) or any(finish_reason == "tool_calls" for finish_reason in finish_reasons)
     
     if use_function_calling:
         for i, output_text in enumerate(output_texts):
             try:
                 # Use tool parser if available (for Qwen3Coder XML format)
                 if tool_parser is not None and hasattr(tool_parser, 'extract_tool_calls'):
+                    logger.info(f"Using Qwen3CoderToolParser for output_text length {len(output_text)}")
                     # Extract tool calls using the tool parser
                     result = tool_parser.extract_tool_calls(output_text, request=None)
+                    logger.info(f"Parser result: tools_called={result.tools_called}, num_calls={len(result.tool_calls or [])}")
                     if result.tools_called and result.tool_calls:
                         tool_calls_list[i] = result.tool_calls
+                        finish_reasons[i] = "tool_calls"
                         continue
                 
                 # Fallback to default parsing for non-tool-parser cases or if tool parser fails

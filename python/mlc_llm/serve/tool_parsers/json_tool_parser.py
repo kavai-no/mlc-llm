@@ -120,7 +120,7 @@ class JsonToolParser(ToolParser):
         
         return None
     
-    def render_tools(self, tools: Optional["List[ChatTool]"] = None) -> str:
+    def render_tools(self, tools: Optional[List[ChatTool]] = None) -> str:
         """Render tool definitions to string.
         
         Args:

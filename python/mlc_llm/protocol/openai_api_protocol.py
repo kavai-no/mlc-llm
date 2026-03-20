@@ -16,6 +16,8 @@ from .conversation_protocol import Conversation
 from .debug_protocol import DebugConfig
 from .error_protocol import BadRequestError
 
+from mlc_llm.support import logging as mlc_logging
+logger = mlc_logging.getLogger(__name__)
 ################ Commons ################
 
 
@@ -239,12 +241,13 @@ class ChatTool(BaseModel):
 
 class ChatFunctionCall(BaseModel):
     name: str
-    arguments: Union[None, Dict[str, Any]] = None
+    arguments: Union[None, Dict[str, Any], str] = None
 
 
 class ChatToolCall(BaseModel):
     id: str = Field(default_factory=lambda: f"call_{shortuuid.random()}")
-    type: Literal["function"]
+    index: Optional[int] = None
+    type: Literal["function"] = 'function'
     function: ChatFunctionCall
 
 
@@ -363,7 +366,11 @@ class ChatCompletionRequest(BaseModel):
                     raise BadRequestError("Non-assistant message having `tool_calls` is invalid.")
                 raise BadRequestError("Assistant message having `tool_calls` is not supported yet.")
 
-    def check_function_call_usage(self, conv_template: Conversation) -> None:
+    def check_function_call_usage(
+        self,
+        conv_template: Conversation,
+        tool_parser_instance: Optional[object] = None,
+    ) -> None:
         """Check if function calling is used and update the conversation template.
         Return error message if invalid request format for function calling.
         """
@@ -372,8 +379,20 @@ class ChatCompletionRequest(BaseModel):
         if self.tools is None or (isinstance(self.tool_choice, str) and self.tool_choice == "none"):
             conv_template.use_function_calling = False
             return
+
         from mlc_llm.serve.tool_parsers import ToolParserManager
-        tool_parser = ToolParserManager.get_parser(conv_template.tool_parser)
+        logger.info(f"check_function_call_usage: conv_template.tool_parser={getattr(conv_template, 'tool_parser', 'NOT_SET')}")
+
+        tool_parser = tool_parser_instance
+        if tool_parser is None:
+            tool_parser = ToolParserManager.get_parser(conv_template.tool_parser)
+            logger.info(f"Retrieved tool_parser class from manager: {tool_parser}")
+            if isinstance(tool_parser, type):
+                logger.error("check_function_call_usage: tool_parser is a class, expected an instance. Rendering tools requires an instance with tokenizer.")
+                conv_template.function_string = ""
+                return
+        else:
+            logger.info(f"Using provided tool_parser instance: {tool_parser}")
         # select the tool based on the tool_choice if specified
         if isinstance(self.tool_choice, dict):
             if self.tool_choice["type"] != "function":  # pylint: disable=unsubscriptable-object
@@ -410,7 +429,22 @@ class ChatCompletionRequest(BaseModel):
             function_list.append(tool.function.model_dump(by_alias=True))
 
         conv_template.use_function_calling = True
-        conv_template.function_string = tool_parser.render_tools(self.tools)
+        logger.info(f"check_function_call_usage: tool_parser={tool_parser}, tools_type={type(self.tools).__name__}, tools_len={len(self.tools) if self.tools else 0}")
+        logger.info(f"Before render_tools: self.tools={self.tools is not None}, bool(self.tools)={bool(self.tools) if self.tools is not None else 'N/A'}")
+        
+        if tool_parser is None:
+            logger.error("tool_parser is None! Cannot render tools")
+            conv_template.function_string = ""
+            return
+
+        if isinstance(tool_parser, type):
+            logger.error("tool_parser is still a class, not an instance. Cannot render tools")
+            conv_template.function_string = ""
+            return
+
+        rendered = tool_parser.render_tools(self.tools)
+        logger.info(f"render_tools returned {len(rendered) if rendered else 0} chars")
+        conv_template.function_string = rendered
 
 
 class ChatCompletionResponseChoice(BaseModel):

@@ -31,5 +31,6 @@ from . import (
     stablelm,
     tinyllama,
     wizardlm,
+    qwen3
 )
 from .registry import ConvTemplateRegistry

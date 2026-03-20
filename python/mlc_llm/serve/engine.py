@@ -1220,6 +1220,7 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
             self.tokenizer.encode,
             self.max_input_sequence_length,
             self.conv_template.model_copy(deep=True),
+            tool_parser_instance=self.tool_parser,
         )
         # prompt length is not used
         _ = prompt_length
@@ -1782,6 +1783,7 @@ class MLCEngine(engine_base.MLCEngineBase):
             self.tokenizer.encode,
             self.max_input_sequence_length,
             self.conv_template.model_copy(deep=True),
+            tool_parser_instance=self.tool_parser,
         )
         _ = prompt_length
 

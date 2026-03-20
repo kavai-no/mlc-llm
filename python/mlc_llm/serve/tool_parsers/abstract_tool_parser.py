@@ -55,7 +55,7 @@ class ToolParser(abc.ABC):
         """Extract tool calls from streaming model output."""
 
     @abc.abstractmethod
-    def render_tools(self, tools: "Optional[List[ChatTool]]" = None) -> str:
+    def render_tools(self, tools: Optional[List[ChatTool]] = None) -> str:
         """Render tool definitions to string."""
 
     def __repr__(self) -> str:
@@ -136,7 +136,7 @@ class DefaultToolParser(ToolParser):
             pass
         return None
 
-    def render_tools(self, tools: Optional[List["ChatTool"]] = None) -> str:
+    def render_tools(self, tools: Optional[List[ChatTool]] = None) -> str:
         """Render tool definitions to a JSON string."""
         if not tools or len(tools) == 0:
             return ""

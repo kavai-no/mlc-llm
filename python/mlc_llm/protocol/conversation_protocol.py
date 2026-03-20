@@ -187,6 +187,9 @@ class Conversation(BaseModel):
 
         if not any(isinstance(item, data.ImageData) for item in message_list):
             # Replace the last function string placeholder with actual function string
+            from mlc_llm.support import logging as mlc_logging
+            logger = mlc_logging.getLogger(__name__)
+            logger.info(f"as_prompt: function_string length={len(self.function_string)}, has_placeholder={MessagePlaceholders.FUNCTION.value in prompt[0]}")
             prompt[0] = self.function_string.join(
                 prompt[0].rsplit(MessagePlaceholders.FUNCTION.value, 1)
             )
