@@ -863,12 +863,33 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
     # normal chunk
     assert len(delta_outputs) == request.n
     choices = []
+    
+    # Track accumulated text for tool parsing - keyed by request_id + response_index
+    if not hasattr(engine_state, '_tool_call_text_buffer'):
+        engine_state._tool_call_text_buffer = {}
+    
     for i, delta_output in enumerate(delta_outputs):
+        # Initialize buffer for this specific response (request_id + index)
+        buffer_key = f"{request_id}_{i}"
+        if buffer_key not in engine_state._tool_call_text_buffer:
+            engine_state._tool_call_text_buffer[buffer_key] = ""
         finish_reason_updated = False
         if delta_output.finish_reason is not None and finish_reasons[i] is None:
-            finish_reasons[i] = (
-                delta_output.finish_reason if not use_function_calling else "tool_calls"
-            )
+            # Only set finish_reason to tool_calls if we actually have function calling
+            # The parser will determine this based on whether it finds tool calls in the XML
+            finish_reasons[i] = delta_output.finish_reason
+            
+            # Check if tool parser has detected actual tool calls (for streaming mode)
+            if tool_parser is not None and use_function_calling:
+                # If TVM set finish_reason to "tool_calls" but we haven't found any in prev_tool_call_arr,
+                # it means the XML was malformed or incomplete
+                if finish_reasons[i] == "tool_calls" and (
+                    not hasattr(tool_parser, 'prev_tool_call_arr') or 
+                    len(tool_parser.prev_tool_call_arr) == 0
+                ):
+                    logger.info(f"Correcting streaming finish_reason from 'tool_calls' to 'stop'")
+                    finish_reasons[i] = "stop"
+            
             finish_reason_updated = True
         if not finish_reason_updated and delta_output.delta_text == "":
             # Ignore empty delta text when finish reason is not updated.
@@ -877,12 +898,18 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
 
         # Use tool parser if available for streaming
         if tool_parser is not None and use_function_calling:
-            # Get accumulated text from delta_output if available
-            current_text = getattr(delta_output, "accumulated_text", None) or ""
+            # Get accumulated text from our buffer
+            current_text = engine_state._tool_call_text_buffer[buffer_key]
             delta_text = delta_output.delta_text
             
+            # Update buffer with new delta text
+            engine_state._tool_call_text_buffer[buffer_key] += delta_text
+            
             # Calculate previous text
-            previous_text = current_text[:-len(delta_text)] if len(delta_text) > 0 and len(current_text) >= len(delta_text) else ""
+            if len(delta_text) > 0 and len(current_text) >= len(delta_text):
+                previous_text = current_text[:-len(delta_text)]
+            else:
+                previous_text = ""
             
             # Call tool parser for streaming
             tool_parser_result = tool_parser.extract_tool_calls_streaming(
@@ -896,12 +923,15 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
             )
             
             if tool_parser_result is not None:
-                # Use the result from tool parser
+                # In non-streaming mode with function calling, we need to ensure content is a string
+                # Always use the tool parser result since it may contain tool calls even when text is empty
                 delta_message = tool_parser_result
             else:
-                # Fall back to default behavior
+                # Fall back to default behavior with structured format for tool calls
                 delta_message = openai_api_protocol.ChatCompletionMessage(
-                    content=delta_output.delta_text, role="assistant"
+                    content=delta_output.delta_text, 
+                    role="assistant",
+                    tool_calls=[]  # Ensure tool_calls is present even when empty
                 )
         else:
             # Default behavior without tool parser or not using function calling
@@ -1125,6 +1155,18 @@ def process_completion_stream_output(  # pylint: disable=too-many-arguments
         finish_reason_updated = False
         if delta_output.finish_reason is not None and finish_reasons[i] is None:
             finish_reasons[i] = delta_output.finish_reason
+            
+            # Check if tool parser has detected actual tool calls (for streaming mode)
+            if use_function_calling and tool_parser is not None:
+                # If TVM set finish_reason to "tool_calls" but we haven't found any in prev_tool_call_arr,
+                # it means the XML was malformed or incomplete
+                if finish_reasons[i] == "tool_calls" and (
+                    not hasattr(tool_parser, 'prev_tool_call_arr') or 
+                    len(tool_parser.prev_tool_call_arr) == 0
+                ):
+                    logger.info(f"Correcting streaming finish_reason from 'tool_calls' to 'stop'")
+                    finish_reasons[i] = "stop"
+            
             finish_reason_updated = True
         if not finish_reason_updated and delta_output.delta_text == "":
             # Ignore empty delta text when finish reason is not updated.
@@ -1260,9 +1302,16 @@ def process_function_call_output(
                     # Extract tool calls using the tool parser
                     result = tool_parser.extract_tool_calls(output_text, request=None)
                     logger.info(f"Parser result: tools_called={result.tools_called}, num_calls={len(result.tool_calls or [])}")
-                    if result.tools_called and result.tool_calls:
+                    if result.tools_called and result.tool_calls and len(result.tool_calls) > 0:
                         tool_calls_list[i] = result.tool_calls
                         finish_reasons[i] = "tool_calls"
+                        continue
+                    elif not result.tools_called or len(result.tool_calls or []) == 0:
+                        # Qwen3Coder parser found NO valid tool calls, but TVM might have thought there were some.
+                        # This happens when XML is malformed or doesn't match expected format.
+                        if finish_reasons[i] == "tool_calls":
+                            logger.info(f"Correcting finish_reason from 'tool_calls' to 'stop' for output_text length {len(output_text)}")
+                            finish_reasons[i] = "stop"
                         continue
                 
                 # Fallback to default parsing for non-tool-parser cases or if tool parser fails
@@ -1314,7 +1363,7 @@ def wrap_chat_completion_response(  # pylint: disable=too-many-arguments
                     openai_api_protocol.ChatCompletionMessage(role="assistant", content=output_text)
                     if not use_function_calling or finish_reason == "error"
                     else openai_api_protocol.ChatCompletionMessage(
-                        role="assistant", tool_calls=tool_calls
+                        role="assistant", content="", tool_calls=tool_calls
                     )
                 ),
                 logprobs=(

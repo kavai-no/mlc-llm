@@ -41,10 +41,10 @@ class Qwen3CoderToolParser(ToolParser):
 
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
-        self.current_tool_id: int = -1
+        self.current_tool_id: Optional[str] = None
         self.streamed_args_for_tool: list[str] = []
         # Track current function name during streaming
-        self.current_function_name: str = ""
+        self.current_function_name: Optional[str] = None
 
         # Sentinel tokens for streaming mode
         self.tool_call_start_token: str = "<tool_call>"
@@ -376,6 +376,7 @@ class Qwen3CoderToolParser(ToolParser):
         
         # Quick check to avoid unnecessary processing
         if self.tool_call_prefix not in model_output:  
+            logger.info(f"No tool calls detected in model output (length: {len(model_output)})")
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
@@ -385,31 +386,43 @@ class Qwen3CoderToolParser(ToolParser):
         try:
             function_calls = self._get_function_calls(model_output)
             
-            # Log debugging info for troubleshooting
-            logger.debug(f"Extracted {len(function_calls)} function calls from model output")
+            # Enhanced debugging and logging
+            logger.debug(f"Extracted {len(function_calls)} function calls from model output (length: {len(model_output)})")
             if len(function_calls) == 0:
                 logger.warning(f"No function calls found in model output. Output preview: {model_output[:200]!r}")
-            
-            if len(function_calls) == 0:
                 return ExtractedToolCallInformation(
                     tools_called=False,
                     tool_calls=[],
                     content=model_output
                 )
             
+            # Detailed logging for each function call found
+            logger.info(f"Found {len(function_calls)} function calls:")
+            for i, func_call in enumerate(function_calls):
+                logger.debug(f"Function call {i+1}: {func_call[:200]!r}...")
+            
             tool_calls = []
+            parsing_errors = 0
             for i, func_str in enumerate(function_calls):
                 try:
                     tool_call = self._parse_tool_call(func_str, request.tools if request else None)
                     if tool_call:
-                        logger.debug(f"Successfully parsed tool call {i+1}: {tool_call.function.name}")
+                        logger.debug(f"Successfully parsed tool call {i+1}: name={tool_call.function.name}")
                         # Add index field to match OpenAI API specification
                         tool_call.index = i
                         tool_calls.append(tool_call)
                     else:
                         logger.warning(f"Failed to parse tool call at index {i}: {func_str[:100]!r}...")
+                        parsing_errors += 1
                 except Exception as e:
                     logger.exception(f"Exception while parsing tool call at index {i}: {e}")
+                    parsing_errors += 1
+            
+            # Log summary of parsing results
+            successful_parses = len(tool_calls)
+            total_attempts = len(function_calls)
+            if successful_parses < total_attempts:
+                logger.warning(f"Parsing summary: {successful_parses}/{total_attempts} function calls successfully parsed")
             
             # Populate prev_tool_call_arr for serving layer to set finish_reason
             self.prev_tool_call_arr.clear()  # Clear previous calls
@@ -420,17 +433,34 @@ class Qwen3CoderToolParser(ToolParser):
                         "arguments": tool_call.function.arguments,
                     })
             
-            # Extract content before tool calls
+            # Enhanced content extraction
+            # Look for both tool_call wrapper and direct function= prefix
             content_index = model_output.find(self.tool_call_start_token)
             if content_index < 0:
                 content_index = model_output.find(self.tool_call_prefix)
-            content = model_output[:content_index] if content_index >= 0 else None
             
-            logger.info(f"Qwen3CoderToolParser.extract result: tools_called={len(tool_calls) > 0}, num_tools={len(tool_calls)}, content_preview={str(content)[:100] if content else None}")
+            if content_index >= 0:
+                content = model_output[:content_index].strip()
+                # Remove trailing whitespace and newlines
+                while content.endswith('\n') or content.endswith(' '):
+                    content = content[:-1]
+                logger.debug(f"Extracted content before tool calls (length: {len(content)})")
+            else:
+                content = None
+            
+            # Comprehensive result logging
+            result_summary = {
+                "tools_called": len(tool_calls) > 0,
+                "num_tools": len(tool_calls),
+                "parsing_success_rate": successful_parses / total_attempts if total_attempts > 0 else 1.0,
+                "content_length": len(content) if content else 0
+            }
+            
+            logger.info(f"Qwen3CoderToolParser.extract result: {result_summary}")
             return ExtractedToolCallInformation(
                 tools_called=(len(tool_calls) > 0),
                 tool_calls=tool_calls,
-                content=content
+                content="" if not content else content
             )
         except Exception as e:
             logger.exception(f"Error in extracting tool call from response: {e}")
@@ -460,16 +490,14 @@ class Qwen3CoderToolParser(ToolParser):
             parameters_str = function_call_str[end_index + 1:]
             param_dict = {}
             
-            # Use regex to find all parameters
-            param_regex = re.compile(
-                r'<parameter\s*=\s*([^>]+)>(.*?)</parameter>',
-                re.DOTALL | re.IGNORECASE
-            )
-            for param_name_match, param_value in param_regex.findall(parameters_str):
-                param_name = param_name_match.strip()
-                param_value = param_value.strip()
+            # Use the same regex as VLLM for parameter extraction
+            param_regex = self.tool_call_parameter_regex
+            for match_text in param_regex.findall(parameters_str):
+                idx = match_text.index(">")
+                param_name = match_text[:idx]
+                param_value = str(match_text[idx + 1:])
                 
-                # Clean up newlines
+                # Remove prefix and trailing \n (matching VLLM behavior)
                 if param_value.startswith("\n"):
                     param_value = param_value[1:]
                 if param_value.endswith("\n"):
@@ -521,46 +549,437 @@ class Qwen3CoderToolParser(ToolParser):
         if not previous_text:
             self._reset_streaming_state()
             self.streaming_request = request
-
-        # If no delta text, return None unless it's an EOS token after tool calls
+        
+        # If no delta text, return structured message instead of None
         if not delta_text:
             # Check if this is an EOS token after all tool calls are complete
-            if (self.tool_call_end_token_id in delta_token_ids or 
-                self.tool_call_end_token in delta_text):
-                pass  # Let the normal flow handle it for completeness check
+            # We check for tool calls in the text even if is_tool_call_started is False
+            # because it might have been reset after processing all tools
+            if delta_token_ids and self.tool_call_end_token_id not in delta_token_ids:
+                # Count complete tool calls
+                complete_calls = len(
+                    self.tool_call_complete_regex.findall(current_text))
 
-            return None
+                # If we have completed tool calls and populated prev_tool_call_arr
+                if complete_calls > 0 and len(self.prev_tool_call_arr) > 0:
+                    # Check if all tool calls are closed
+                    open_calls = current_text.count(
+                        self.tool_call_start_token) - current_text.count(
+                            self.tool_call_end_token)
+                    if open_calls == 0:
+                        # Return empty delta message with vLLM format
+                        return ChatCompletionMessage(
+                            content="",
+                            role="assistant", 
+                            name=None,
+                            tool_calls=[],
+                            tool_call_id=None
+                        )
+                elif not self.is_tool_call_started and current_text:
+                    # This is a regular content response that's now complete - use vLLM format
+                    return ChatCompletionMessage(
+                        content="",
+                        role="assistant", 
+                        name=None,
+                        tool_calls=[],
+                        tool_call_id=None
+                    )
+                
+            # When tool call has started but we haven't extracted function info yet,
+            # and no other conditions matched, return structured message with empty tool_calls
+            if self.is_tool_call_started and not self.current_function_name:
+                return ChatCompletionMessage(
+                    content="",
+                    role="assistant",
+                    name=None,
+                    tool_calls=[],
+                    tool_call_id=self.current_tool_id if self.current_tool_id else None
+                )
+            
+            # Always return structured message, never None
+            return ChatCompletionMessage(
+                content="",
+                role="assistant",
+                name=None,
+                tool_calls=[],
+                tool_call_id=self.current_tool_id if self.current_tool_id else None
+            )
 
-        # Update accumulated text and content tracking
+        # Update accumulated text
         self.accumulated_text = current_text
 
-        # Handle state transitions when not yet started a tool call
-        if not self.is_tool_call_started:
-            # Check if entering first part of new token sequence (for custom tokens)
-            start_token_in_delta = (
-                delta_text.startswith(self.tool_call_prefix) or 
-                any(token in str(delta_text).encode('utf-8', 'replace').decode() for token in [self.tool_call_start_token]) or
-                self.tool_call_start_token_id in getattr(request, '_token_ids', [])
-            )
-            
-            # Fallback: check if we see the start tokens directly  
-            tool_starts_in_text = current_text.count(self.tool_call_prefix)
-            prev_tool_calls_processed = len([t for t in self.prev_tool_call_arr if 'name' in t])
-            
-            is_new_content_starting_with_function_delta = (
-                previous_text.endswith('\n') and delta_text.lstrip().startswith('<function=') or 
-                (not hasattr(self, '_last_seen_prefix_len')) # first time seeing content after reset
-            )
+        # Check if we need to advance to next tool
+        if self.json_closed and not self.in_function:
+            # Check if this tool call has ended
+            tool_ends = current_text.count(self.tool_call_end_token)
+            if tool_ends > self.current_tool_index:
+                # This tool has ended, advance to next
+                self.current_tool_index += 1
+                self.header_sent = False
+                self.param_count = 0
+                self.json_started = False
+                self.json_closed = False
+                self.accumulated_params = {}
 
-        # Check if we need to advance to next tool call based on completed vs processing count
-        current_tool_starts_count = (
-            self.accumulated_text.count('<function=') + 
-            (self.tool_call_start_token in delta_text)
-        )
+                # Check if there are more tool calls
+                tool_starts = current_text.count(self.tool_call_start_token)
+                if self.current_tool_index >= tool_starts:
+                    # No more tool calls
+                    self.is_tool_call_started = False
+                # Continue processing next tool - return structured message
+                return ChatCompletionMessage(
+                    content="",
+                    role="assistant",
+                    name=None,
+                    tool_calls=[],
+                    tool_call_id=self.current_tool_id if self.current_tool_id else None
+                )
+                
+            # When tool call has started but we haven't extracted function info yet,
+            # and no other conditions matched, try to extract function information first
+            if self.is_tool_call_started and not self.current_function_name:
+                # Check accumulated text for function information (might span multiple deltas)
+                if "function" in current_text.lower():
+                    # Try to extract function name from the accumulated text
+                    func_match = re.search(r'<function=(.*?)>', current_text, re.IGNORECASE)
+                    if func_match:
+                        self.current_function_name = func_match.group(1).strip()
+                        self.current_tool_id = self._generate_tool_call_id()
+                        return ChatCompletionMessage(
+                            content="",
+                            role="assistant", 
+                            name=None,
+                            tool_calls=[ChatToolCall(
+                                type="function",
+                                id=str(self.current_tool_id),
+                                index=0,
+                                function=ChatFunctionCall(name=self.current_function_name, arguments="")
+                            )],
+                            tool_call_id=None
+                        )
+                    
+                    # Also try matching without closing > for partial output in accumulated text
+                    func_match = re.search(r'<function=(.*)$', current_text, re.IGNORECASE)
+                    if func_match:
+                        self.current_function_name = func_match.group(1).strip()
+                        self.current_tool_id = self._generate_tool_call_id()
+                        return ChatCompletionMessage(
+                            content="",
+                            role="assistant", 
+                            name=None,
+                            tool_calls=[ChatToolCall(
+                                type="function",
+                                id=str(self.current_tool_id),
+                                index=0,
+                                function=ChatFunctionCall(name=self.current_function_name, arguments="{}")
+                            )],
+                            tool_call_id=None
+                        )
+                
+                # Return any content before the tool call with proper structure
+                if self.tool_call_start_token in delta_text:
+                    content_before = delta_text[:delta_text.index(
+                        self.tool_call_start_token)]
+                    if content_before and not self.current_function_name:
+                        # No function name extracted yet, return empty tool_calls
+                        return ChatCompletionMessage(
+                            content="", 
+                            role="assistant", 
+                            name=None,
+                            tool_calls=[],
+                            tool_call_id=None
+                        )
+                
+                # When we detect tool call start but no content/function info yet,
+                # still return empty tool_calls to signal structure, not None
+                return ChatCompletionMessage(
+                    content="",
+                    role="assistant", 
+                    name=None,
+                    tool_calls=[],
+                    tool_call_id=None
+                )
+            else:
+                # Check if we're between tool calls - skip whitespace
+                if current_text.rstrip().endswith(self.tool_call_end_token):
+                    # We just ended a tool call, skip whitespace
+                    if delta_text.strip() == "":
+                        return ChatCompletionMessage(
+                            content="",
+                            role="assistant", 
+                            name=None,
+                            tool_calls=[],
+                            tool_call_id=self.current_tool_id if self.current_tool_id else None
+                        )
+                # When tool call has started but we haven't extracted function info yet,
+                # and we get whitespace/empty content, return structured message with empty tool_calls
+                if self.is_tool_call_started and not self.current_function_name:
+                    return ChatCompletionMessage(
+                        content="",
+                        role="assistant",
+                        name=None,
+                        tool_calls=[],
+                        tool_call_id=self.current_tool_id if self.current_tool_id else None
+                    )
+                
+                # Normal content, no tool call - but return in vLLM format
+                if delta_text.strip():
+                    # Only send as tool call if we have a function name
+                    if self.current_function_name:
+                        return ChatCompletionMessage(
+                            role="assistant", 
+                            name=None,
+                            tool_calls=[ChatToolCall(
+                                type="function",
+                                id=str(self.current_tool_id),
+                                index=0,
+                                function=ChatFunctionCall(name=self.current_function_name, arguments=delta_text)
+                            )],
+                            tool_call_id=None
+                        )
+                    else:
+                        # No function name yet - return as plain content
+                        return ChatCompletionMessage(
+                            content="",
+                            role="assistant", 
+                            name=None,
+                            tool_calls=[],
+                            tool_call_id=None
+                        )
+                
+# Check if this is just the opening tag with no content yet
+            if delta_text.strip() == "<tool_call>" and not self.is_tool_call_started:
+                # Return empty structured message to indicate tool call started
+                return ChatCompletionMessage(
+                    role="assistant", 
+                    name=None,
+                    tool_calls=[],
+                    tool_call_id=None
+                )
+            elif delta_text.strip() == "" and current_text.startswith(self.tool_call_start_token):
+                # Return empty structured message for whitespace in tool call
+                return ChatCompletionMessage(
+                    role="assistant", 
+                    name=None,
+                    tool_calls=[],
+                    tool_call_id=None
+                )
+            
+            return ChatCompletionMessage(
+                content="",
+                role="assistant",
+                name=None,
+                tool_calls=[],
+                tool_call_id=self.current_tool_id if self.current_tool_id else None
+            )
         
-        has_more_calls_available = False
+        # Check if we're between tool calls (waiting for next one)
+        # Count tool calls we've seen vs processed
+        tool_starts_count = current_text.count(self.tool_call_start_token)
+        if self.current_tool_index >= tool_starts_count:
+            # We're past all tool calls, shouldn't be here
+            return ChatCompletionMessage(
+                content="",
+                role="assistant",
+                name=None,
+                tool_calls=[],
+                tool_call_id=self.current_tool_id if self.current_tool_id else None
+            )
+        # Need to find the correct tool call based on current_tool_index
+        tool_starts = []
+        idx = 0
+        while True:
+            idx = current_text.find(self.tool_call_start_token, idx)
+            if idx == -1:
+                break
+            tool_starts.append(idx)
+            idx += len(self.tool_call_start_token)
 
-    def _handle_new_message_reset(self):
-        """Helper method to reset for new message processing."""
-        pass # Already handled above    
-        return f"{self.__class__.__name__}(tokenizer={self.model_tokenizer})"
+        if self.current_tool_index >= len(tool_starts):
+            # No more tool calls to process yet
+            return ChatCompletionMessage(
+                content="",
+                role="assistant",
+                name=None,
+                tool_calls=[],
+                tool_call_id=self.current_tool_id if self.current_tool_id else None
+            )
+
+        tool_start_idx = tool_starts[self.current_tool_index]
+        # Find where this tool call ends (or current position if not ended yet)
+        tool_end_idx = current_text.find(self.tool_call_end_token,
+                                         tool_start_idx)
+        if tool_end_idx == -1:
+            tool_text = current_text[tool_start_idx:]
+        else:
+            tool_text = current_text[tool_start_idx:tool_end_idx +
+                                     len(self.tool_call_end_token)]
+
+        # Looking for function header
+        if not self.header_sent:
+            if self.tool_call_prefix in tool_text:
+                func_start = tool_text.find(self.tool_call_prefix) + len(
+                    self.tool_call_prefix)
+                func_end = tool_text.find(">", func_start)
+
+                if func_end != -1:
+                    # Found complete function name
+                    self.current_function_name = tool_text[func_start:func_end]
+                    self.current_tool_id = self._generate_tool_call_id()
+                    self.header_sent = True
+                    self.in_function = True
+
+                    # IMPORTANT: Add to prev_tool_call_arr immediately when we detect a tool call
+                    # This ensures finish_reason="tool_calls" even if parsing isn't complete
+                    already_added = any(
+                        tool.get("name") == self.current_function_name
+                        for tool in self.prev_tool_call_arr)
+                    if not already_added:
+                        self.prev_tool_call_arr.append({
+                            "name": self.current_function_name,
+                            "arguments":
+                            "{}",  # Placeholder, will be updated later
+                        })
+
+                        # Send header with function info - include name immediately (LM Studio format)
+                    return ChatCompletionMessage(
+                        content="",
+                        role="assistant", 
+                        name=None,
+                        tool_calls=[ChatToolCall(
+                            type="function",
+                            id=str(self.current_tool_id),
+                            index=0,  # Always use index 0 for first tool call
+                            function=ChatFunctionCall(name=self.current_function_name, arguments="")
+                        )],
+                        tool_call_id=None
+                    )
+            
+            # Return empty message to maintain structure even when no action taken
+            return ChatCompletionMessage(
+                content="",
+                role="assistant",
+                tool_calls=[],
+                tool_call_id=self.current_tool_id if self.current_tool_id else None
+            )
+
+        # We've sent header, now handle function body
+        if self.in_function:
+            # Send function name with empty arguments initially (LM Studio format)
+            if not self.json_started and self.parameter_prefix in current_text:
+                self.json_started = True
+                return ChatCompletionMessage(
+                    content="",
+                    role="assistant", 
+                    name=None,
+                    tool_calls=[ChatToolCall(
+                        type="function",
+                        id=str(self.current_tool_id),
+                        index=0,  # Always use index 0 for first (and only) tool call
+                        function=ChatFunctionCall(name=self.current_function_name, arguments="")
+                    )],
+                    tool_call_id=None
+                )
+
+            # Check for parameter updates in delta text using the proper regex
+            param_match = self.tool_call_parameter_regex.search(delta_text)
+            if param_match and not self.in_param:
+                # Found new parameter opening - don't send anything yet, just note we're in a parameter
+                self.in_param = True
+                self.param_count += 1
+                param_text = param_match.group(0)
+                eq_pos = param_text.find("=")
+                if eq_pos != -1:
+                    self.current_param_name = param_text[eq_pos+1:].split(">", 1)[0]
+                return ChatCompletionMessage(
+                    content="",
+                    role="assistant",
+                    name=None,
+                    tool_calls=[],
+                    tool_call_id=self.current_tool_id if self.current_tool_id else None
+                )
+            elif self.in_param:
+                # Accumulate parameter value for JSON building
+                self.current_param_value += delta_text.strip()
+                
+                # Check for closing tag to finalize the parameter and build complete JSON
+                if "</parameter>" in tool_text:
+                    # Build proper JSON string
+                    arguments_json = json.dumps({self.current_param_name: self.current_param_value})
+                    return ChatCompletionMessage(
+                        content="",
+                        role="assistant", 
+                        name=None,
+                        tool_calls=[ChatToolCall(
+                            type="function",
+                            id=str(self.current_tool_id),
+                            index=0,  # Always use index 0 for first (and only) tool call
+                            function=ChatFunctionCall(name=self.current_function_name, arguments=arguments_json)
+                        )],
+                        tool_call_id=None
+                    )
+                    self.in_param = False
+                    self.current_param_value = ""
+                # Return incremental updates during parameter accumulation
+                return ChatCompletionMessage(
+                    content="",
+                    role="assistant",
+                    name=None,
+                    tool_calls=[ChatToolCall(
+                        type="function",
+                        id=str(self.current_tool_id),
+                        index=0,
+                        function=ChatFunctionCall(name=self.current_function_name, arguments=self.current_param_value)
+                    )],
+                    tool_call_id=None
+                )
+
+            # Check for function end in accumulated text
+            if not self.json_closed and self.function_end_token in tool_text:
+                # Close JSON
+                self.json_closed = True
+
+                # Extract the complete tool call to update prev_tool_call_arr with final arguments
+                # Find the function content
+                func_start = tool_text.find(self.tool_call_prefix) + len(
+                    self.tool_call_prefix)
+                func_content_end = tool_text.find(self.function_end_token,
+                                                  func_start)
+                if func_content_end != -1:
+                    func_content = tool_text[func_start:func_content_end]
+                    # Parse to get the complete arguments
+                    try:
+                        parsed_tool = self._parse_tool_call(
+                            func_content, self.streaming_request.tools
+                            if self.streaming_request else None)
+                        if parsed_tool:
+                            # Update existing entry in prev_tool_call_arr with complete arguments
+                            for i, tool in enumerate(self.prev_tool_call_arr):
+                                if tool.get("name") == parsed_tool.function.name:
+                                    self.prev_tool_call_arr[i]["arguments"] = parsed_tool.function.arguments
+                                    break
+                    except Exception:
+                        pass  # Ignore parsing errors during streaming
+
+                # Close JSON - don't add literal '}' to arguments
+                return ChatCompletionMessage(
+                    content="",
+                    role="assistant", 
+                    name=None,
+                    tool_calls=[ChatToolCall(
+                        type="function",
+                        id=str(self.current_tool_id),
+                        index=0,
+                        function=ChatFunctionCall(name=self.current_function_name, arguments="{}")
+                    )],
+                    tool_call_id=None
+                )
+            
+        # Return empty message to maintain structure when no tool call detected
+        return ChatCompletionMessage(
+            content="",
+            role="assistant", 
+            name=None,
+            tool_calls=[],
+            tool_call_id=self.current_tool_id if self.current_tool_id else None
+        )
