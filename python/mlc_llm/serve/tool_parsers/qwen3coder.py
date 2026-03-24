@@ -86,40 +86,17 @@ class Qwen3CoderToolParser(ToolParser):
             # Fallback to vocab lookup (vocab may be token->id or id->token)
             self.tool_call_start_token_id = self.vocab.get(self.tool_call_start_token)
             self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
-            if self.tool_call_start_token_id is None and isinstance(self.vocab, dict):
-                # Try reverse if id->token
-                for tid, tstr in self.vocab.items():
-                    if tstr == self.tool_call_start_token:
-                        self.tool_call_start_token_id = tid
-                        break
 
         logger.debug(f"Qwen3 tool call tokens: {self.tool_call_start_token}={self.tool_call_start_token_id}, "
                      f"{self.tool_call_end_token}={self.tool_call_end_token_id}")
 
         # Check if tokens are found in vocabulary
         if self.tool_call_start_token_id is None or self.tool_call_end_token_id is None:
-            logger.warning(
+            raise RuntimeError(
                 f"Qwen3 XML Tool parser could not locate tool call start/end "
                 f"tokens in the tokenizer! Start token '{self.tool_call_start_token}' "
                 f"ID: {self.tool_call_start_token_id}, End token '{self.tool_call_end_token}' "
                 f"ID: {self.tool_call_end_token_id}")
-            # Try to find these tokens in a different way
-            if self.tool_call_start_token_id is None:
-                for token_id, token_str in self.vocab.items():
-                    if token_str == self.tool_call_start_token:
-                        self.tool_call_start_token_id = token_id
-                        break
-            if self.tool_call_end_token_id is None:
-                for token_id, token_str in self.vocab.items():
-                    if token_str == self.tool_call_end_token:
-                        self.tool_call_end_token_id = token_id
-                        break
-
-        # If still not found, set to a default value to prevent crashes
-        if self.tool_call_start_token_id is None:
-            self.tool_call_start_token_id = 0
-        if self.tool_call_end_token_id is None:
-            self.tool_call_end_token_id = 0
 
         logger.info(
             f"MLC LLM Successfully imported tool parser {self.__class__.__name__} !")
@@ -234,32 +211,24 @@ class Qwen3CoderToolParser(ToolParser):
         return f"call_{uuid.uuid4().hex[:24]}"
 
     def _reset_streaming_state(self):
-        """Reset streaming state for a new message."""
-        self.current_tool_name_sent = False
-        self.prev_tool_call_arr = []
-        self.current_tool_id = -1
-        self.streamed_args_for_tool = []
-        self.is_tool_call_started = False
-        self.failed_count = 0
-        
-        # Additional streaming state for better tool call tracking
+        """Reset all streaming state."""
         self.current_tool_index = 0
+        self.is_tool_call_started = False
         self.header_sent = False
+        self.current_tool_id = None
+        self.current_function_name = None
+        self.current_param_name = None
+        self.current_param_value = ""
+        self.param_count = 0
+        self.in_param = False
         self.in_function = False
+        self.accumulated_text = ""
         self.json_started = False
         self.json_closed = False
+        # Store accumulated parameters for type conversion
         self.accumulated_params = {}
-        
-        # Streaming-specific state (matching vLLM implementation)
-        self.current_param_name: str = ""
-        self.current_param_value: str = ""
-        self.param_count: int = 0
-        self.in_param: bool = False
-        self.accumulated_text: str = ""
-        self.streaming_request: Optional[ChatCompletionRequest] = None
-        
-        # Accumulate tool call content across streaming chunks
-        self._accumulated_tool_call_content: str = ""
+        self.streaming_request = None
+
 
     def _get_arguments_config(
             self, func_name: str,
@@ -452,15 +421,10 @@ class Qwen3CoderToolParser(ToolParser):
                     })
             
             # Extract content before tool calls
-            # Determine the start of the first tool call for content preview
-            # Determine the start of the first tool call for content preview
             content_index = model_output.find(self.tool_call_start_token)
             if content_index < 0:
                 content_index = model_output.find(self.tool_call_prefix)
-            if content_index >= 0:
-                content = model_output[:content_index]
-            else:
-                content = None
+            content = model_output[:content_index] if content_index >= 0 else None
             
             logger.info(f"Qwen3CoderToolParser.extract result: tools_called={len(tool_calls) > 0}, num_tools={len(tool_calls)}, content_preview={str(content)[:100] if content else None}")
             return ExtractedToolCallInformation(
