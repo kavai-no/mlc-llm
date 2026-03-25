@@ -14,7 +14,7 @@ ConvTemplateRegistry.register_conv_template(
         seps=["<|im_end|>\n"],
         role_content_sep="\n",
         role_empty_sep="\n",
-        stop_str=["</s>", "<|im_end|>"],
+        stop_str=["<|endoftext|>", "<|im_end|>"],
         stop_token_ids=[151643, 151645],
     )
 )
@@ -59,11 +59,16 @@ Reminder:
 <|im_end|>
 """).strip(),
         system_message="You are a helpful assistant.",
-        roles={"user": "<|im_start|>user", "assistant": "<|im_start|>assistant"},
+        role_templates={
+            "assistant": f"<|im_start|>user\n{MessagePlaceholders.ASSISTANT.value}\n<|im_end|>\n",
+            "user": f"<|im_start|>user\n{MessagePlaceholders.USER.value}\n<|im_end|>\n",
+            "tool": f"<|im_start|>user\n<tool_response>\n{MessagePlaceholders.TOOL.value}\n</tool_reponse><|im_end|>\n"
+        },
+        roles={"user": "", "assistant": "", "tool": ""},
         seps=["<|im_end|>\n"],
         role_content_sep="\n",
         role_empty_sep="\n",
-        stop_str=["</s>", "<|im_end|>"],
+        stop_str=["<|endoftext|>", "<|im_end|>"],
         stop_token_ids=[151643, 151645],
         tool_parser="qwen3_coder"
     )

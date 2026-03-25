@@ -923,15 +923,83 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
             )
             
             if tool_parser_result is not None:
-                # In non-streaming mode with function calling, we need to ensure content is a string
-                # Always use the tool parser result since it may contain tool calls even when text is empty
-                delta_message = tool_parser_result
-            else:
-                # Fall back to default behavior with structured format for tool calls
+                # In streaming mode, we need proper deltas for tool calls
+                # The tool parser returns complete messages, so we construct a delta from changes
+                if request.stream and hasattr(tool_parser_result, 'tool_calls') and tool_parser_result.tool_calls:
+                    # Create proper streaming delta with incremental tool call info
+                    first_tool_call = tool_parser_result.tool_calls[0]
+                    
+                    # Check what's changed from previous state
+                    if hasattr(engine_state, '_prev_streaming_tool_state'):
+                        prev_state = engine_state._prev_streaming_tool_state.get(request_id + f"_{i}", {})
+                        
+                        # Only include fields that have changed or are new
+                        tool_delta = {}
+                        if 'function' in first_tool_call and hasattr(first_tool_call.function, 'name'):
+                            if prev_state.get('function', {}).get('name') != first_tool_call.function.name:
+                                tool_delta['name'] = first_tool_call.function.name
+                        
+                        # Always include arguments as they change incrementally
+                        if hasattr(first_tool_call.function, 'arguments'):
+                            tool_delta['arguments'] = first_tool_call.function.arguments
+                            
+                        # Include id only once when starting
+                        if not prev_state.get('sent_id'):
+                            tool_delta['id'] = str(getattr(first_tool_call, 'id', ''))
+                            engine_state._prev_streaming_tool_state.setdefault(request_id + f"_{i}", {})['sent_id'] = True
+                            
+                        delta_message = openai_api_protocol.ChatCompletionMessage(
+                            content="",
+                            role="assistant"
+                        ) if (not tool_delta and 'arguments' not in tool_delta) else openai_api_protocol.ChatCompletionMessage(
+                            content="",
+                            role="assistant",
+                            tool_calls=[openai_api_protocol.ChatToolCall(
+                                type="function",
+                                index=0,
+                                function=openai_api_protocol.ChatFunctionCall(name=first_tool_call.function.name, **tool_delta) if tool_delta else None
+                            )]
+                        )
+                    else:
+                        # First chunk - include initial structure
+                        delta_message = openai_api_protocol.ChatCompletionMessage(
+                            content="",
+                            role="assistant",
+                            tool_calls=[openai_api_protocol.ChatToolCall(
+                                type="function",
+                                index=0,
+                                function=openai_api_protocol.ChatFunctionCall(name=first_tool_call.function.name, arguments="{}")
+                            )]
+                        )
+                    
+                    # Track current state for next comparison
+                    if not hasattr(engine_state, '_prev_streaming_tool_state'):
+                        engine_state._prev_streaming_tool_state = {}
+                    engine_state._prev_streaming_tool_state[request_id + f"_{i}"] = {
+                        'function': {'name': first_tool_call.function.name} if hasattr(first_tool_call.function, 'name') else {},
+                        'arguments': first_tool_call.function.arguments if hasattr(first_tool_call.function, 'arguments') else ""
+                    }
+                elif not hasattr(tool_parser_result, 'tool_calls') or len(tool_parser_result.tool_calls) == 0:
+                    # Tool parser result with empty/no tool calls - remove tool_calls field
+                    delta_message = openai_api_protocol.ChatCompletionMessage(
+                        content=getattr(tool_parser_result, 'content', ''),
+                        role="assistant",
+                        name=getattr(tool_parser_result, 'name', None)
+                    )
+                else:
+                    # Non-streaming or no streaming changes - use full message
+                    delta_message = tool_parser_result
+            elif tool_parser_result is not None and (not hasattr(tool_parser_result, 'tool_calls') or len(tool_parser_result.tool_calls) == 0):
+                # Tool parser returned a result but with empty/no tool calls
                 delta_message = openai_api_protocol.ChatCompletionMessage(
                     content=delta_output.delta_text, 
-                    role="assistant",
-                    tool_calls=[]  # Ensure tool_calls is present even when empty
+                    role="assistant"
+                )
+            else:
+                # No tool parser or no function calling - default behavior
+                delta_message = openai_api_protocol.ChatCompletionMessage(
+                    content=delta_output.delta_text, 
+                    role="assistant"
                 )
         else:
             # Default behavior without tool parser or not using function calling
@@ -1094,7 +1162,7 @@ def process_completion_stream_output(  # pylint: disable=too-many-arguments
     request_id: str,
     engine_state: EngineState,
     finish_reasons: List[Optional[str]],
-) -> Optional[openai_api_protocol.CompletionResponse]:
+) -> Optional[openai_api_protocol.ChatCompletionResponse]:
     """Process the delta outputs of a single request of Completion,
     convert the delta output to CompletionResponse and return.
 
@@ -1130,7 +1198,7 @@ def process_completion_stream_output(  # pylint: disable=too-many-arguments
     if is_final_chunk:
         assert len(delta_outputs) == 1
         engine_state.record_event(request_id, event="yield final usage")
-        response = openai_api_protocol.CompletionResponse(
+        response = openai_api_protocol.ChatCompletionResponse(
             id=request_id,
             choices=[],
             model=request.model,
@@ -1152,23 +1220,8 @@ def process_completion_stream_output(  # pylint: disable=too-many-arguments
     assert len(delta_outputs) == request.n
     choices = []
     for i, delta_output in enumerate(delta_outputs):
-        finish_reason_updated = False
         if delta_output.finish_reason is not None and finish_reasons[i] is None:
             finish_reasons[i] = delta_output.finish_reason
-            
-            # Check if tool parser has detected actual tool calls (for streaming mode)
-            if use_function_calling and tool_parser is not None:
-                # If TVM set finish_reason to "tool_calls" but we haven't found any in prev_tool_call_arr,
-                # it means the XML was malformed or incomplete
-                if finish_reasons[i] == "tool_calls" and (
-                    not hasattr(tool_parser, 'prev_tool_call_arr') or 
-                    len(tool_parser.prev_tool_call_arr) == 0
-                ):
-                    logger.info(f"Correcting streaming finish_reason from 'tool_calls' to 'stop'")
-                    finish_reasons[i] = "stop"
-            
-            finish_reason_updated = True
-        if not finish_reason_updated and delta_output.delta_text == "":
             # Ignore empty delta text when finish reason is not updated.
             continue
 
@@ -1292,10 +1345,10 @@ def process_function_call_output(
     n = len(output_texts)
     tool_calls_list: List[List[openai_api_protocol.ChatToolCall]] = [[] for _ in range(n)]
     content_list: List[str] = [""] * n  # Track content for each response
-    use_function_calling = (tool_parser is not None) or any(finish_reason == "tool_calls" for finish_reason in finish_reasons)
+    # Determine function calling per-response instead of globally
+    # This fixes issues with multiple responses where only some have tool calls
     
-    if use_function_calling:
-        for i, output_text in enumerate(output_texts):
+    for i, output_text in enumerate(output_texts):
             try:
                 # Use tool parser if available (for Qwen3Coder XML format)
                 if tool_parser is not None and hasattr(tool_parser, 'extract_tool_calls'):
@@ -1345,7 +1398,9 @@ def process_function_call_output(
                 output_texts[i] = f"Got an invalid function call output from model: {str(e)}"
                 finish_reasons[i] = "error"
     
-    return use_function_calling, tool_calls_list, content_list
+    # Determine if function calling was used for ANY response
+    actual_use_function_calling = (tool_parser is not None) or any(len(calls) > 0 for calls in tool_calls_list)
+    return actual_use_function_calling, tool_calls_list, content_list
 
 
 def wrap_chat_completion_response(  # pylint: disable=too-many-arguments
@@ -1357,46 +1412,50 @@ def wrap_chat_completion_response(  # pylint: disable=too-many-arguments
     content_list: List[str],
     logprob_results: Optional[List[List[openai_api_protocol.LogProbsContent]]],
     use_function_calling: bool,
-    usage: Optional[Dict[str, Any]],
+    usage: Optional[openai_api_protocol.CompletionUsage],
 ) -> openai_api_protocol.ChatCompletionResponse:
     """Wrap the non-streaming chat completion results to ChatCompletionResponse instance."""
+    choices = []
+    for i in range(len(output_texts)):
+        output_text = output_texts[i]
+        finish_reason = finish_reasons[i]
+        tool_calls = tool_calls_list[i] if i < len(tool_calls_list) else None
+        content_for_message = content_list[i] if i < len(content_list) else ""
+        
+        # Determine if function calling should be used for this specific response
+        per_response_use_function_calling = (
+            finish_reason == "tool_calls" and len(tool_calls) > 0
+        )
+        
+        # When tool calls are present, always include both content and tool_calls
+        message = (
+            openai_api_protocol.ChatCompletionMessage(
+                role="assistant", 
+                content=content_for_message if content_for_message else "",
+                tool_calls=tool_calls if len(tool_calls) > 0 else None
+            )
+            if per_response_use_function_calling or finish_reason == "error"
+            else openai_api_protocol.ChatCompletionMessage(role="assistant", content=output_text)
+        )
+        
+        choices.append(openai_api_protocol.ChatCompletionResponseChoice(
+            index=i,
+            finish_reason=finish_reason,
+            message=message,
+            logprobs=(
+                openai_api_protocol.LogProbs(content=logprob_results[i])
+                if logprob_results is not None and i < len(logprob_results)
+                else None
+            ),
+        ))
+    
     return openai_api_protocol.ChatCompletionResponse(
         id=request_id,
-        choices=[
-            openai_api_protocol.ChatCompletionResponseChoice(
-                index=i,
-                finish_reason=finish_reasons[i],
-                message=(
-                    openai_api_protocol.ChatCompletionMessage(role="assistant", content=output_text)
-                    if not use_function_calling or finish_reason == "error"
-                    else (
-                        # When tool calls are present, use the pre-tool-call content
-                        openai_api_protocol.ChatCompletionMessage(
-                            role="assistant", 
-                            content=content_for_message if content_for_message and content_for_message.strip() else "",
-                            tool_calls=tool_calls
-                        ) if len(tool_calls) > 0 else
-                        # When no tool calls found, use the original output text (might be regular text)
-                        openai_api_protocol.ChatCompletionMessage(
-                            role="assistant", content=output_text
-                        )
-                    )
-                ),
-                logprobs=(
-                    openai_api_protocol.LogProbs(content=logprob_results[i])
-                    if logprob_results is not None and i < len(logprob_results)
-                    else None
-                ),
-            )
-            for i, (output_text, finish_reason, tool_calls, content_for_message) in enumerate(
-                zip(output_texts, finish_reasons, tool_calls_list, content_list)
-            )
-        ],
+        choices=choices,
         model=model,
         system_fingerprint="",
         usage=usage,
     )
-
 
 def wrap_completion_response(  # pylint: disable=too-many-arguments
     request_id: str,

@@ -323,6 +323,7 @@ async def request_chat_completion(
         for choice in response.choices:
             assert isinstance(choice.delta.content, str)
             output_texts[choice.index] += choice.delta.content
+                
             if choice.finish_reason is not None and finish_reasons[choice.index] is None:
                 finish_reasons[choice.index] = choice.finish_reason
             if choice.logprobs is not None:
@@ -334,9 +335,32 @@ async def request_chat_completion(
     # Get the tool parser from async_engine if available
     tool_parser = getattr(async_engine, 'tool_parser', None)
     
-    use_function_calling, tool_calls_list, content_list = engine_base.process_function_call_output(
-        output_texts, finish_reasons, tool_parser=tool_parser
-    )
+    # Special handling: when using Qwen3Coder with XML format, output_texts might be empty
+    # because tool call XML doesn't appear as text content. Check if we should use the buffer.
+    if (tool_parser is not None and hasattr(tool_parser, 'prev_tool_call_arr') 
+        and len(tool_parser.prev_tool_call_arr) > 0):
+        # Get accumulated XML from engine state buffer
+        buffer_text = ""
+        if hasattr(async_engine.state, '_tool_call_text_buffer'):
+            for key in async_engine.state._tool_call_text_buffer.keys():
+                if "_" + str(request.n - 1) in key:  # Match last response index
+                    buffer_text = async_engine.state._tool_call_text_buffer[key]
+                    break
+        
+        print(f"[DEBUG] Using accumulated XML from buffer (len={len(buffer_text)}) for tool parsing")
+        # Create non-None version of finish_reasons for the function signature
+        safe_finish_reasons = [fr if fr is not None else "stop" for fr in finish_reasons]
+        use_function_calling, tool_calls_list, content_list = engine_base.process_function_call_output(
+            [buffer_text or "<function="],  # Use buffer content if available
+            safe_finish_reasons,
+            tool_parser=tool_parser
+        )
+    else:
+        # Create non-None version of finish_reasons for the function signature
+        safe_finish_reasons = [fr if fr is not None else "stop" for fr in finish_reasons]
+        use_function_calling, tool_calls_list, content_list = engine_base.process_function_call_output(
+            output_texts, safe_finish_reasons, tool_parser=tool_parser
+        )
     resp = engine_base.wrap_chat_completion_response(
         request_id=request_id,
         model=request.model,
