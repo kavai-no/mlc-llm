@@ -364,7 +364,6 @@ class ChatCompletionRequest(BaseModel):
             if message.tool_calls is not None:
                 if message.role != "assistant":
                     raise BadRequestError("Non-assistant message having `tool_calls` is invalid.")
-                raise BadRequestError("Assistant message having `tool_calls` is not supported yet.")
 
     def check_function_call_usage(
         self,

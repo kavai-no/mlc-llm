@@ -334,7 +334,7 @@ async def request_chat_completion(
     # Get the tool parser from async_engine if available
     tool_parser = getattr(async_engine, 'tool_parser', None)
     
-    use_function_calling, tool_calls_list = engine_base.process_function_call_output(
+    use_function_calling, tool_calls_list, content_list = engine_base.process_function_call_output(
         output_texts, finish_reasons, tool_parser=tool_parser
     )
     resp = engine_base.wrap_chat_completion_response(
@@ -343,6 +343,7 @@ async def request_chat_completion(
         output_texts=output_texts,
         finish_reasons=finish_reasons,
         tool_calls_list=tool_calls_list,
+        content_list=content_list,
         logprob_results=logprob_results,
         use_function_calling=use_function_calling,
         usage=request_final_usage,

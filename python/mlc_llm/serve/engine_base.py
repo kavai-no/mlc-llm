@@ -1279,7 +1279,7 @@ def process_function_call_output(
     output_texts: List[str],
     finish_reasons: List[str],
     tool_parser: Optional[Any] = None,
-) -> Tuple[bool, List[List[openai_api_protocol.ChatToolCall]]]:
+) -> Tuple[bool, List[List[openai_api_protocol.ChatToolCall]], List[str]]:
     """Process the potential function call results outputted by model,
     according to the finish reasons.
     Return whether the output has function call, and the list of tool calls.
@@ -1291,6 +1291,7 @@ def process_function_call_output(
     logger.info(f"process_function_call_output: tool_parser={tool_parser}, finish_reasons={finish_reasons}")
     n = len(output_texts)
     tool_calls_list: List[List[openai_api_protocol.ChatToolCall]] = [[] for _ in range(n)]
+    content_list: List[str] = [""] * n  # Track content for each response
     use_function_calling = (tool_parser is not None) or any(finish_reason == "tool_calls" for finish_reason in finish_reasons)
     
     if use_function_calling:
@@ -1305,6 +1306,11 @@ def process_function_call_output(
                     if result.tools_called and result.tool_calls and len(result.tool_calls) > 0:
                         tool_calls_list[i] = result.tool_calls
                         finish_reasons[i] = "tool_calls"
+                        # Store the content before tool calls for use in wrap_chat_completion_response
+                        if hasattr(result, 'content') and result.content:
+                            content_list[i] = result.content
+                        else:
+                            content_list[i] = ""
                         continue
                     elif not result.tools_called or len(result.tool_calls or []) == 0:
                         # Qwen3Coder parser found NO valid tool calls, but TVM might have thought there were some.
@@ -1339,7 +1345,7 @@ def process_function_call_output(
                 output_texts[i] = f"Got an invalid function call output from model: {str(e)}"
                 finish_reasons[i] = "error"
     
-    return use_function_calling, tool_calls_list
+    return use_function_calling, tool_calls_list, content_list
 
 
 def wrap_chat_completion_response(  # pylint: disable=too-many-arguments
@@ -1348,6 +1354,7 @@ def wrap_chat_completion_response(  # pylint: disable=too-many-arguments
     output_texts: List[str],
     finish_reasons: List[str],
     tool_calls_list: List[List[openai_api_protocol.ChatToolCall]],
+    content_list: List[str],
     logprob_results: Optional[List[List[openai_api_protocol.LogProbsContent]]],
     use_function_calling: bool,
     usage: Optional[Dict[str, Any]],
@@ -1362,18 +1369,27 @@ def wrap_chat_completion_response(  # pylint: disable=too-many-arguments
                 message=(
                     openai_api_protocol.ChatCompletionMessage(role="assistant", content=output_text)
                     if not use_function_calling or finish_reason == "error"
-                    else openai_api_protocol.ChatCompletionMessage(
-                        role="assistant", content="", tool_calls=tool_calls
+                    else (
+                        # When tool calls are present, use the pre-tool-call content
+                        openai_api_protocol.ChatCompletionMessage(
+                            role="assistant", 
+                            content=content_for_message if content_for_message and content_for_message.strip() else "",
+                            tool_calls=tool_calls
+                        ) if len(tool_calls) > 0 else
+                        # When no tool calls found, use the original output text (might be regular text)
+                        openai_api_protocol.ChatCompletionMessage(
+                            role="assistant", content=output_text
+                        )
                     )
                 ),
                 logprobs=(
                     openai_api_protocol.LogProbs(content=logprob_results[i])
-                    if logprob_results is not None
+                    if logprob_results is not None and i < len(logprob_results)
                     else None
                 ),
             )
-            for i, (output_text, finish_reason, tool_calls) in enumerate(
-                zip(output_texts, finish_reasons, tool_calls_list)
+            for i, (output_text, finish_reason, tool_calls, content_for_message) in enumerate(
+                zip(output_texts, finish_reasons, tool_calls_list, content_list)
             )
         ],
         model=model,

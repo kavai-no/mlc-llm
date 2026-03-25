@@ -653,7 +653,7 @@ class Qwen3CoderToolParser(ToolParser):
                                 type="function",
                                 id=str(self.current_tool_id),
                                 index=0,
-                                function=ChatFunctionCall(name=self.current_function_name, arguments="")
+                                function=ChatFunctionCall(name=self.current_function_name, arguments="{}")
                             )],
                             tool_call_id=None
                         )
@@ -850,7 +850,7 @@ class Qwen3CoderToolParser(ToolParser):
                             type="function",
                             id=str(self.current_tool_id),
                             index=0,  # Always use index 0 for first tool call
-                            function=ChatFunctionCall(name=self.current_function_name, arguments="")
+                            function=ChatFunctionCall(name=self.current_function_name, arguments="{}")
                         )],
                         tool_call_id=None
                     )
@@ -876,7 +876,7 @@ class Qwen3CoderToolParser(ToolParser):
                         type="function",
                         id=str(self.current_tool_id),
                         index=0,  # Always use index 0 for first (and only) tool call
-                        function=ChatFunctionCall(name=self.current_function_name, arguments="")
+                        function=ChatFunctionCall(name=self.current_function_name, arguments="{}")
                     )],
                     tool_call_id=None
                 )
