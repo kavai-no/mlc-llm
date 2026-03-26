@@ -532,13 +532,9 @@ class Qwen3CoderToolParser(ToolParser):
                         additional_properties = params.get('additionalProperties', True)
                         break
             
-            # Check if any arguments provided at all - check both param_dict and converted_param_dict
-            if not param_dict or len(param_dict) == 0:
+            # If there are required parameters but none were provided, reject the call
+            if required_params and not param_dict:
                 logger.warning(f"No parameters found in tool call XML for: {function_name}")
-                return None
-            
-            if not converted_param_dict or len(converted_param_dict) == 0:
-                logger.warning(f"Empty argument dict detected after conversion for tool call: {function_name}")
                 return None
             
             # Check if all required parameters are present
@@ -1109,3 +1105,59 @@ class Qwen3CoderToolParser(ToolParser):
             tool_calls=[],
             tool_call_id=self.current_tool_id if self.current_tool_id else None
         )
+    
+    def render_tool_calls(self, tool_calls: List[ChatToolCall]) -> str:
+        """Render tool calls as XML for Qwen3Coder format.
+        
+        Args:
+            tool_calls: The tool calls to render (OpenAI protocol)
+            
+        Returns:
+            str: The rendered tool calls in Qwen3Coder XML format
+        """
+        xmls = []
+        for tool_call in tool_calls:
+            # Generate XML structure matching Qwen3Coder expectations
+            if not hasattr(tool_call, 'function') or not hasattr(tool_call.function, 'name'):
+                logger.warning(f"Invalid tool call format: {tool_call}")
+                continue
+                
+            xml_parts = [
+                "\n<tool_call>\n",
+                f"<function={tool_call.function.name}>\n"
+            ]
+            
+            # Parse arguments and add as parameters
+            try:
+                if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
+                    args_str = tool_call.function.arguments
+                    if isinstance(args_str, str):
+                        args_dict = json.loads(args_str)
+                    else:
+                        args_dict = args_str
+                        
+                    if isinstance(args_dict, dict):
+                        for param_name, param_value in args_dict.items():
+                            xml_parts.append(f"<parameter={param_name}>\n")
+                            if isinstance(param_value, (dict, list)) and not isinstance(param_value, str):
+                                # Complex types: use JSON
+                                xml_parts.append(json.dumps(param_value, ensure_ascii=False))
+                            else:
+                                # Simple types: convert to string
+                                xml_parts.append(str(param_value))
+                            xml_parts.append("\n</parameter>\n")
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(f"Failed to parse function arguments: {e}")
+                # Include raw arguments if parsing fails
+                if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
+                    xml_parts.append("<parameter=arguments>\n")
+                    xml_parts.append(str(tool_call.function.arguments))
+                    xml_parts.append("\n</parameter>\n")
+            
+            xml_parts.extend([
+                "</function>\n",
+                "</tool_call>"
+            ])
+            xmls.append(''.join(xml_parts))
+
+        return ''.join(xmls)

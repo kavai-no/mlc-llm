@@ -1438,11 +1438,6 @@ def process_function_call_output(
                                 logger.info(f"Tool call {idx} arguments are not a valid dict: {type(args_dict)}")
                                 has_valid_args = False
                                 break
-                            elif len(args_dict) == 0:
-                                # Empty dict - treat as invalid for required parameters
-                                logger.warning(f"Tool call {idx} has empty arguments dict - this causes streaming issues with multiple tool_calls!")
-                                has_valid_args = False
-                                break
                         except (json.JSONDecodeError, ValueError) as e:
                             # Invalid JSON or empty string
                             logger.info(f"Tool call {idx} has invalid JSON: {e}")
@@ -1452,14 +1447,10 @@ def process_function_call_output(
                     # Log final state for this response (before clearing)
                     logger.info(f"Response {i} PRE-CLEAR: tools_called={result.tools_called}, has_valid_args={has_valid_args}, tool_calls_count={len(tool_calls_list[i]) if i < len(tool_calls_list) else 0}, finish_reason={finish_reasons[i]}")
                     
-                    # Clear tool calls when arguments are empty to prevent streaming incomplete tool calls
+                    # Clear tool calls only when JSON parsing failed
                     if not has_valid_args:
-                        logger.info(f"Response {i}: Clearing tool_calls_list[{i}] due to invalid arguments - prevents empty {{}} tool calls from appearing in streaming")
+                        logger.info(f"Response {i}: Clearing tool_calls_list[{i}] due to invalid JSON - prevents malformed tool calls from appearing in streaming")
                         tool_calls_list[i] = []
-                        # If we have empty args but tools_called=True, set finish_reason='tool_calls'
-                        if result.tools_called:
-                            logger.info(f"Response {i}: tools_called=True with empty args - setting finish_reason='tool_calls' instead of 'stop'")
-                            finish_reasons[i] = "tool_calls"
                     elif result.tools_called:
                         logger.info(f"Response {i}: Valid tool calls detected, keeping finish_reason='tool_calls'")
                     
@@ -1474,6 +1465,15 @@ def process_function_call_output(
                         logger.info(f"Correcting finish_reason from 'tool_calls' to 'stop' for output_text length {len(output_text)}")
                         finish_reasons[i] = "stop"
                     continue
+                
+                # Valid tool call - copy to output list before continue
+                if hasattr(result, 'tool_calls') and result.tool_calls:
+                    tool_calls_list[i] = result.tool_calls
+            
+            # When function validation passes (len(args_dict) > 0), we need to populate tool_calls_list[i]
+            if finish_reasons[i] == "tool_calls":
+                if hasattr(result, 'tool_calls') and result.tool_calls:
+                    tool_calls_list[i] = result.tool_calls
             
             # Fallback to default parsing for non-tool-parser cases or if tool parser fails
             fn_json_list = convert_function_str_to_json(output_text)

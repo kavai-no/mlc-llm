@@ -58,6 +58,21 @@ class ToolParser(abc.ABC):
     def render_tools(self, tools: Optional[List[ChatTool]] = None) -> str:
         """Render tool definitions to string."""
 
+    @abc.abstractmethod
+    def render_tool_calls(self, tool_calls: List[ChatToolCall]) -> str:
+        """Render tool calls as a string for inclusion in conversation history.
+        
+        This method should return the tool calls in a format that can be included
+        in the prompt when the assistant is calling tools. Different models may use
+        different formats (e.g., XML for Qwen3Coder, JSON for others).
+        
+        Args:
+            tool_calls: List of tool calls to render
+            
+        Returns:
+            str: The rendered tool calls in the appropriate format for this model
+        """
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
 
@@ -70,6 +85,8 @@ class DefaultToolParser(ToolParser):
     def __init__(self, tokenizer: Tokenizer):
         """Initialize the tool parser."""
         super().__init__(tokenizer)
+
+ 
 
     def extract_tool_calls(
         self,
@@ -148,6 +165,30 @@ class DefaultToolParser(ToolParser):
 
         for tool in tools:
             rendered_output.append(f"```json\n{tool}\n```\n")
+
+        return "".join(rendered_output)
+    
+    def render_tool_calls(self, tool_calls: List[ChatToolCall]) -> str:
+        """Render tool calls to a JSON string.
+        
+        Args:
+            tool_calls: List of tool calls to render (OpenAI protocol)
+            
+        Returns:
+            str: The rendered tool calls in JSON format
+        """
+        if not tool_calls or len(tool_calls) == 0:
+            return ""
+
+        rendered_output = []
+
+        for i, tool_call in enumerate(tool_calls):
+            rendered_output.append("```json\n")
+            rendered_output.append(json.dumps({
+                "name": tool_call.function.name,
+                "arguments": json.loads(tool_call.function.arguments) if isinstance(tool_call.function.arguments, str) else tool_call.function.arguments
+            }, indent=2))
+            rendered_output.append("\n```")
 
         return "".join(rendered_output)
 
