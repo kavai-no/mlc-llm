@@ -689,7 +689,9 @@ class Qwen3CoderToolParser(ToolParser):
                     func_match = re.search(r'<function=(.*?)>', current_text, re.IGNORECASE)
                     if func_match:
                         self.current_function_name = func_match.group(1).strip()
-                        self.current_tool_id = self._generate_tool_call_id()
+                        # Only generate tool ID once when function name is first detected
+                        if not self.current_tool_id:
+                            self.current_tool_id = self._generate_tool_call_id()
                         return ChatCompletionMessage(
                             content="",
                             role="assistant", 
@@ -698,7 +700,7 @@ class Qwen3CoderToolParser(ToolParser):
                                 type="function",
                                 id=str(self.current_tool_id),
                                 index=0,
-                                function=ChatFunctionCall(name=self.current_function_name, arguments="{}")
+                                function=ChatFunctionCall(name=self.current_function_name, arguments="")
                             )],
                             tool_call_id=None
                         )
