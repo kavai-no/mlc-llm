@@ -766,12 +766,27 @@ def process_chat_completion_request(  # pylint: disable=too-many-arguments
     for message in request.messages:
         role = message.role
         content = message.content
+        # Skip tool response messages (role="tool") - these should not be included
+        # in the conversation history passed to the model, as they can cause
+        # the model to generate duplicate or incorrect tool calls
         if role == "system":
             assert isinstance(content, str)
             conv_template.system_message = content if content is not None else ""
             continue
-        conv_template.messages.append((role, content))
-    conv_template.messages.append(("assistant", None))
+        elif role != "tool":  # Don't add tool response messages
+            conv_template.messages.append((role, content))
+    
+    # Check if we should add an empty assistant message
+    # We skip this when there are tool calls in the conversation (from previous iterations)
+    # to avoid generating empty deltas from role_empty_sep placeholders
+    has_tool_calls_in_history = any(
+        hasattr(msg, 'tool_calls') and msg.tool_calls
+        for msg in request.messages
+        if hasattr(msg, 'tool_calls')
+    )
+    
+    if not has_tool_calls_in_history:
+        conv_template.messages.append(("assistant", None))
 
     # - Get the prompt from template, and encode to token ids.
     # - Check prompt length
@@ -901,6 +916,22 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
             # Get accumulated text from our buffer
             current_text = engine_state._tool_call_text_buffer[buffer_key]
             delta_text = delta_output.delta_text
+            
+            # Check if this appears to be the start of a new response after tool processing
+            # We detect this when we have empty or whitespace-only content that likely indicates
+            # a continuation request (like "try again") where no new tool call should be generated
+            if not current_text or current_text.strip() == "":
+                # Clear any stale accumulated state for truly new requests
+                engine_state._tool_call_text_buffer[buffer_key] = ""
+                current_text = ""    
+            
+            # Additional check: if we have content but it appears to be just closing tags or responses,
+            # clear the buffer as this indicates post-tool-processing state
+            elif (current_text.strip().startswith("</tool_call>") or 
+                  ("{" in current_text and "}" in current_text)):
+                # This looks like tool response content, not model output - reset
+                engine_state._tool_call_text_buffer[buffer_key] = ""
+                current_text = ""
             
             # Update buffer with new delta text
             engine_state._tool_call_text_buffer[buffer_key] += delta_text

@@ -612,14 +612,17 @@ class Qwen3CoderToolParser(ToolParser):
                         self.tool_call_start_token) - current_text.count(
                             self.tool_call_end_token)
                     if open_calls == 0:
-                        # Return empty delta message with vLLM format
-                        return ChatCompletionMessage(
-                            content="",
-                            role="assistant", 
-                            name=None,
-                            tool_calls=[],
-                            tool_call_id=None
-                        )
+                        # Return empty delta message with vLLM format only if there's actual content
+                        if self.current_function_name:
+                            return ChatCompletionMessage(
+                                content="",
+                                role="assistant", 
+                                name=None,
+                                tool_calls=[],
+                                tool_call_id=None
+                            )
+                        # No meaningful state, return None to skip this chunk
+                        return None
                 elif not self.is_tool_call_started and current_text:
                     # This is a regular content response that's now complete - use vLLM format
                     return ChatCompletionMessage(
@@ -633,6 +636,16 @@ class Qwen3CoderToolParser(ToolParser):
             # When tool call has started but we haven't extracted function info yet,
             # and no other conditions matched, return structured message with empty tool_calls
             if self.is_tool_call_started and not self.current_function_name:
+                # Check if the accumulated text contains only tool responses/results
+                # If so, there's nothing for us to parse - return None
+                if current_text.strip() and "{" in current_text and "}" in current_text:
+                    try:
+                        json.loads(current_text)
+                        # This looks like a JSON object (tool response), not model output
+                        # Return None to skip generating empty deltas
+                        return None
+                    except:
+                        pass
                 return ChatCompletionMessage(
                     content="",
                     role="assistant",
@@ -641,14 +654,34 @@ class Qwen3CoderToolParser(ToolParser):
                     tool_call_id=self.current_tool_id if self.current_tool_id else None
                 )
             
-            # Always return structured message, never None
-            return ChatCompletionMessage(
-                content="",
-                role="assistant",
-                name=None,
-                tool_calls=[],
-                tool_call_id=self.current_tool_id if self.current_tool_id else None
-            )
+            # Check if we're seeing only JSON responses (tool results) with no model output
+            if current_text.strip() and "{" in current_text and "}" in current_text:
+                try:
+                    json.loads(current_text)
+                    # This is a JSON object, likely a tool response - skip it
+                    return None
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            
+            # Enhanced check for tool call XML tags - if we only have closing tags or no XML,
+            # this might be a continuation after a completed tool interaction
+            if self.tool_call_end_token in current_text and self.tool_call_start_token not in current_text:
+                # Only closing tag found, likely already processed - skip
+                return None
+            
+            # For regular cases, only return structured message when we have meaningful state
+            if self.is_tool_call_started or self.current_function_name:
+                # We're in the middle of processing tools, return structured message
+                return ChatCompletionMessage(
+                    content="",
+                    role="assistant",
+                    name=None,
+                    tool_calls=[],
+                    tool_call_id=self.current_tool_id if self.current_tool_id else None
+                )
+            
+            # No meaningful state or content - return None to skip empty delta
+            return None
 
         # Update accumulated text
         self.accumulated_text = current_text
@@ -725,6 +758,15 @@ class Qwen3CoderToolParser(ToolParser):
                             tool_call_id=None
                         )
                 
+                # Check if this is just JSON content (tool response) with no function calls
+                if current_text.strip() and "{" in current_text and "}" in current_text:
+                    try:
+                        parsed = json.loads(current_text)
+                        # This is a tool response, not model output - return None to skip
+                        return None
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                
                 # Return any content before the tool call with proper structure
                 if self.tool_call_start_token in delta_text:
                     content_before = delta_text[:delta_text.index(
@@ -761,8 +803,16 @@ class Qwen3CoderToolParser(ToolParser):
                             tool_call_id=self.current_tool_id if self.current_tool_id else None
                         )
                 # When tool call has started but we haven't extracted function info yet,
-                # and we get whitespace/empty content, return structured message with empty tool_calls
+                # and we get whitespace/empty content, check for JSON first
                 if self.is_tool_call_started and not self.current_function_name:
+                    # Check if this is just JSON content (tool response) with no function calls
+                    if current_text.strip() and "{" in current_text and "}" in current_text:
+                        try:
+                            parsed = json.loads(current_text)
+                            # This is a tool response, not model output - return None to skip
+                            return None
+                        except (json.JSONDecodeError, ValueError):
+                            pass
                     return ChatCompletionMessage(
                         content="",
                         role="assistant",
@@ -959,17 +1009,27 @@ class Qwen3CoderToolParser(ToolParser):
                         tool_call_id=None
                     )
                 # Return incremental updates during parameter accumulation
+                # Only return if there's actual content in the parameter value
+                if self.current_param_value.strip():
+                    return ChatCompletionMessage(
+                        content="",
+                        role="assistant",
+                        name=None,
+                        tool_calls=[ChatToolCall(
+                            type="function",
+                            id=str(self.current_tool_id),
+                            index=0,
+                            function=ChatFunctionCall(name=self.current_function_name, arguments=self.current_param_value)
+                        )],
+                        tool_call_id=None
+                    )
+                # No content to send, return None-like message but structured
                 return ChatCompletionMessage(
                     content="",
                     role="assistant",
                     name=None,
-                    tool_calls=[ChatToolCall(
-                        type="function",
-                        id=str(self.current_tool_id),
-                        index=0,
-                        function=ChatFunctionCall(name=self.current_function_name, arguments="")
-                    )],
-                    tool_call_id=None
+                    tool_calls=[],
+                    tool_call_id=self.current_tool_id if self.current_tool_id else None
                 )
 
             # Check for function end in accumulated text

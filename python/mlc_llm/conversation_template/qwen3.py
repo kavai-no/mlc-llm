@@ -23,7 +23,7 @@ ConvTemplateRegistry.register_conv_template(
 ConvTemplateRegistry.register_conv_template(
     Conversation(
         name="qwen3_coder",
-        system_template=dedent(f"""<|im_start|>system
+        system_template=f"""<|im_start|>system
 {MessagePlaceholders.SYSTEM.value}
 
 # Tools
@@ -57,12 +57,12 @@ Reminder:
 - If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls
 </IMPORTANT>
 <|im_end|>
-""").strip(),
+""".strip(),
         system_message="You are a helpful assistant.",
         role_templates={
-            "assistant": f"<|im_start|>user\n{MessagePlaceholders.ASSISTANT.value}\n<|im_end|>\n",
+            "assistant": f"<|im_start|>assistant\n{MessagePlaceholders.ASSISTANT.value}\n<|im_end|>\n",
             "user": f"<|im_start|>user\n{MessagePlaceholders.USER.value}\n<|im_end|>\n",
-            "tool": f"<|im_start|>user\n<tool_response>\n{MessagePlaceholders.TOOL.value}\n</tool_reponse><|im_end|>\n"
+            "tool": f"<|im_start|>user\n<tool_response>\n{MessagePlaceholders.TOOL.value}\n</tool_response>\n<|im_end|>\n"
         },
         roles={"user": "", "assistant": "", "tool": ""},
         seps=["<|im_end|>\n"],
