@@ -887,7 +887,7 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
                     not hasattr(tool_parser, 'prev_tool_call_arr') or 
                     len(tool_parser.prev_tool_call_arr) == 0
                 ):
-                    logger.info(f"Correcting streaming finish_reason from 'tool_calls' to 'stop'")
+                    logger.info("Correcting streaming finish_reason from 'tool_calls' to 'stop'")
                     finish_reasons[i] = "stop"
             
             finish_reason_updated = True
@@ -1342,81 +1342,112 @@ def process_function_call_output(
     the default AST-based parsing.
     """
     logger.info(f"process_function_call_output: tool_parser={tool_parser}, finish_reasons={finish_reasons}")
+    logger.info(f"Output texts received: {[len(t) for t in output_texts]}")
+    # Track if we've seen a valid tool call with arguments to prevent duplicate empty ones
+    _seen_valid_tool_call = [False] * len(output_texts)
+    # Log full text for debugging (may contain sensitive info)
+    for i, text in enumerate(output_texts):
+        logger.debug(f"Response {i} FULL raw output: {repr(text)}")
     n = len(output_texts)
     tool_calls_list: List[List[openai_api_protocol.ChatToolCall]] = [[] for _ in range(n)]
     content_list: List[str] = [""] * n  # Track content for each response
+    
+    # Log the raw model output (first few chars for privacy)
+    for i, text in enumerate(output_texts):
+        preview = text[:200] if len(text) > 200 else text
+        logger.info(f"Response {i} raw output: {repr(preview)}... length={len(text)}")
     # Determine function calling per-response instead of globally
     # This fixes issues with multiple responses where only some have tool calls
     
     for i, output_text in enumerate(output_texts):
-            try:
-                # Use tool parser if available (for Qwen3Coder XML format)
-                if tool_parser is not None and hasattr(tool_parser, 'extract_tool_calls'):
-                    logger.info(f"Using Qwen3CoderToolParser for output_text length {len(output_text)}")
-                    # Extract tool calls using the tool parser
-                    result = tool_parser.extract_tool_calls(output_text, request=None)
-                    logger.info(f"Parser result: tools_called={result.tools_called}, num_calls={len(result.tool_calls or [])}")
-                    if result.tools_called and result.tool_calls and len(result.tool_calls) > 0:
-                        # Validate that required parameters are present before treating as valid tool call
-                        has_valid_args = True
-                        for tool_call in result.tool_calls:
-                            if not hasattr(tool_call, 'function') or not tool_call.function:
+        try:
+            # Use tool parser if available (for Qwen3Coder XML format)
+            if tool_parser is not None and hasattr(tool_parser, 'extract_tool_calls'):
+                logger.info(f"Using Qwen3CoderToolParser for output_text length {len(output_text)}")
+                # Extract tool calls using the tool parser
+                result = tool_parser.extract_tool_calls(output_text, request=None)
+                logger.info(f"Parser result: tools_called={result.tools_called}, num_calls={len(result.tool_calls or [])}")
+                if result.tools_called and result.tool_calls and len(result.tool_calls) > 0:
+                    # Validate that required parameters are present before treating as valid tool call
+                    has_valid_args = True
+                    logger.info(f"Validating {len(result.tool_calls)} tool calls from parser - checking for empty arguments")
+                    for idx, tool_call in enumerate(result.tool_calls):
+                        if not hasattr(tool_call, 'function') or not tool_call.function:
+                            logger.info(f"Tool call {idx} missing function attribute")
+                            has_valid_args = False
+                            break
+                        args_str = getattr(tool_call.function, 'arguments', '{}')
+                        logger.info(f"Tool call {idx}: name={getattr(tool_call.function, 'name', None)}, args={repr(args_str)}")
+                        try:
+                            args_dict = json.loads(args_str)
+                            if not isinstance(args_dict, dict):
+                                logger.info(f"Tool call {idx} arguments are not a valid dict: {type(args_dict)}")
                                 has_valid_args = False
                                 break
-                            args_str = getattr(tool_call.function, 'arguments', '{}')
-                            try:
-                                args_dict = json.loads(args_str)
-                                if not isinstance(args_dict, dict):
-                                    has_valid_args = False
-                                    break
-                            except (json.JSONDecodeError, ValueError):
-                                # Invalid JSON or empty string
+                            elif len(args_dict) == 0:
+                                # Empty dict - treat as invalid for required parameters
+                                logger.warning(f"Tool call {idx} has empty arguments dict - this causes streaming issues with multiple tool_calls!")
                                 has_valid_args = False
                                 break
-                        
-                        tool_calls_list[i] = result.tool_calls
-                        if has_valid_args:
-                            finish_reasons[i] = "tool_calls"
-                        else:
-                            finish_reasons[i] = "stop"  # Treat as regular response
-                        # Store the content before tool calls for use in wrap_chat_completion_response
-                        if hasattr(result, 'content') and result.content:
-                            content_list[i] = result.content
-                        else:
-                            content_list[i] = ""
-                        continue
-                    elif not result.tools_called or len(result.tool_calls or []) == 0:
-                        # Qwen3Coder parser found NO valid tool calls, but TVM might have thought there were some.
-                        # This happens when XML is malformed or doesn't match expected format.
-                        if finish_reasons[i] == "tool_calls":
-                            logger.info(f"Correcting finish_reason from 'tool_calls' to 'stop' for output_text length {len(output_text)}")
-                            finish_reasons[i] = "stop"
-                        continue
-                
-                # Fallback to default parsing for non-tool-parser cases or if tool parser fails
-                fn_json_list = convert_function_str_to_json(output_text)
-                
-                # Convert parsed JSON to ChatToolCall objects
-                tool_calls_list[i] = [
-                    openai_api_protocol.ChatToolCall(
-                        type="function",
-                        function=openai_api_protocol.ChatFunctionCall(
-                            name=fn_json_obj["name"], arguments=fn_json_obj["arguments"]
-                        ),
-                    )
-                    for fn_json_obj in fn_json_list
-                    if fn_json_obj is not None
-                ]
-                
-                # Validate that we got valid tool calls
-                if len(tool_calls_list[i]) == 0:
-                    output_texts[i] = "Got an invalid function call output from model"
-                    finish_reasons[i] = "error"
-                else:
-                    finish_reasons[i] = "tool_calls"
-            except (SyntaxError, ValueError, IndexError, KeyError) as e:
-                output_texts[i] = f"Got an invalid function call output from model: {str(e)}"
+                        except (json.JSONDecodeError, ValueError) as e:
+                            # Invalid JSON or empty string
+                            logger.info(f"Tool call {idx} has invalid JSON: {e}")
+                            has_valid_args = False
+                            break
+                    
+                    tool_calls_list[i] = result.tool_calls
+                    if has_valid_args:
+                        logger.info(f"Response {i}: Valid tool calls detected, setting finish_reason='tool_calls'")
+                        finish_reasons[i] = "tool_calls"
+                        _seen_valid_tool_call[i] = True
+                    else:
+                        # If we already saw a valid tool call, don't add empty ones during streaming
+                        if _seen_valid_tool_call[i]:
+                            logger.warning(f"Response {i}: Skipping duplicate empty tool call after valid one")
+                            tool_calls_list[i] = []
+                        logger.info(f"Response {i}: Invalid/empty arguments detected, setting finish_reason='stop'")
+                        finish_reasons[i] = "stop"  # Treat as regular response
+                    
+                    # Log final state for this response
+                    logger.info(f"Response {i} FINAL: tool_calls_count={len(tool_calls_list[i]) if i < len(tool_calls_list) else 0}, finish_reason={finish_reasons[i]}, content_length={len(content_list[i]) if i < len(content_list) else 0}")
+                    # Clear tool calls when arguments are empty to prevent streaming incomplete tool calls
+                    if not has_valid_args:
+                        logger.info(f"Response {i}: Clearing tool_calls_list[{i}] due to invalid arguments - prevents empty {{}} tool calls from appearing in streaming")
+                        tool_calls_list[i] = []
+                    content_list[i] = ""
+                    continue
+                elif not result.tools_called or len(result.tool_calls or []) == 0:
+                    # Qwen3Coder parser found NO valid tool calls, but TVM might have thought there were some.
+                    # This happens when XML is malformed or doesn't match expected format.
+                    if finish_reasons[i] == "tool_calls":
+                        logger.info(f"Correcting finish_reason from 'tool_calls' to 'stop' for output_text length {len(output_text)}")
+                        finish_reasons[i] = "stop"
+                    continue
+            
+            # Fallback to default parsing for non-tool-parser cases or if tool parser fails
+            fn_json_list = convert_function_str_to_json(output_text)
+            
+            # Convert parsed JSON to ChatToolCall objects
+            tool_calls_list[i] = [
+                openai_api_protocol.ChatToolCall(
+                    type="function",
+                    function=openai_api_protocol.ChatFunctionCall(
+                        name=fn_json_obj["name"], arguments=fn_json_obj["arguments"]
+                    ),
+                )
+                for fn_json_obj in fn_json_list
+                if fn_json_obj is not None
+            ]
+            
+            # Validate that we got valid tool calls
+            if len(tool_calls_list[i]) == 0:
+                output_texts[i] = "Got an invalid function call output from model"
                 finish_reasons[i] = "error"
+            else:
+                finish_reasons[i] = "tool_calls"
+        except (SyntaxError, ValueError, IndexError, KeyError) as e:
+            output_texts[i] = f"Got an invalid function call output from model: {str(e)}"
+            finish_reasons[i] = "error"
     
     # Determine if function calling was used for ANY response
     actual_use_function_calling = (tool_parser is not None) or any(len(calls) > 0 for calls in tool_calls_list)
