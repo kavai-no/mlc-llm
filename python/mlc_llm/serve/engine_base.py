@@ -1357,8 +1357,28 @@ def process_function_call_output(
                     result = tool_parser.extract_tool_calls(output_text, request=None)
                     logger.info(f"Parser result: tools_called={result.tools_called}, num_calls={len(result.tool_calls or [])}")
                     if result.tools_called and result.tool_calls and len(result.tool_calls) > 0:
+                        # Validate that required parameters are present before treating as valid tool call
+                        has_valid_args = True
+                        for tool_call in result.tool_calls:
+                            if not hasattr(tool_call, 'function') or not tool_call.function:
+                                has_valid_args = False
+                                break
+                            args_str = getattr(tool_call.function, 'arguments', '{}')
+                            try:
+                                args_dict = json.loads(args_str)
+                                if not isinstance(args_dict, dict):
+                                    has_valid_args = False
+                                    break
+                            except (json.JSONDecodeError, ValueError):
+                                # Invalid JSON or empty string
+                                has_valid_args = False
+                                break
+                        
                         tool_calls_list[i] = result.tool_calls
-                        finish_reasons[i] = "tool_calls"
+                        if has_valid_args:
+                            finish_reasons[i] = "tool_calls"
+                        else:
+                            finish_reasons[i] = "stop"  # Treat as regular response
                         # Store the content before tool calls for use in wrap_chat_completion_response
                         if hasattr(result, 'content') and result.content:
                             content_list[i] = result.content
