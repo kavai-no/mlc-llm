@@ -517,6 +517,51 @@ class Qwen3CoderToolParser(ToolParser):
                     # Fallback to original value if conversion fails
                     converted_param_dict[param_name] = param_value
             
+            # Validate required parameters
+            tools_list = tools or []
+            required_params = []
+            additional_properties = True
+            properties = {}
+            for config in tools_list:
+                func_obj = getattr(config, 'function', None)
+                if func_obj is not None and hasattr(func_obj, 'parameters'):
+                    params = func_obj.parameters
+                    if isinstance(params, dict) and 'required' in params:
+                        required_params = params['required']
+                        properties = params.get('properties', {})
+                        additional_properties = params.get('additionalProperties', True)
+                        break
+            
+            # Check if any arguments provided at all - check both param_dict and converted_param_dict
+            if not param_dict or len(param_dict) == 0:
+                logger.warning(f"No parameters found in tool call XML for: {function_name}")
+                return None
+            
+            if not converted_param_dict or len(converted_param_dict) == 0:
+                logger.warning(f"Empty argument dict detected after conversion for tool call: {function_name}")
+                return None
+            
+            # Check if all required parameters are present
+            missing_required = []
+            for param_name in required_params:
+                if param_name not in converted_param_dict:
+                    missing_required.append(param_name)
+            
+            if missing_required:
+                logger.warning(f"Tool '{function_name}' is missing required parameters: {missing_required}. Converted params available: {list(converted_param_dict.keys())}")
+                return None
+            
+            # Check for extra properties not in schema (if additionalProperties is False)
+            if not additional_properties and len(properties) > 0:
+                extra_props = []
+                for key in converted_param_dict.keys():
+                    if key not in properties:
+                        extra_props.append(key)
+                
+                if extra_props:
+                    logger.warning(f"Tool '{function_name}' has extra properties not in schema: {extra_props}. Allowed properties: {list(properties.keys())}")
+                    return None
+            
             # Create and return ChatToolCall with JSON string arguments (matching vllm format)
             return ChatToolCall(
                 type="function",
@@ -662,7 +707,9 @@ class Qwen3CoderToolParser(ToolParser):
                     func_match = re.search(r'<function=(.*)$', current_text, re.IGNORECASE)
                     if func_match:
                         self.current_function_name = func_match.group(1).strip()
-                        self.current_tool_id = self._generate_tool_call_id()
+                        # Only generate tool ID once when function name is first detected
+                        if not self.current_tool_id:
+                            self.current_tool_id = self._generate_tool_call_id()
                         return ChatCompletionMessage(
                             content="",
                             role="assistant", 
@@ -671,7 +718,7 @@ class Qwen3CoderToolParser(ToolParser):
                                 type="function",
                                 id=str(self.current_tool_id),
                                 index=0,
-                                function=ChatFunctionCall(name=self.current_function_name, arguments="{}")
+                                function=ChatFunctionCall(name=self.current_function_name, arguments="")
                             )],
                             tool_call_id=None
                         )
@@ -724,8 +771,8 @@ class Qwen3CoderToolParser(ToolParser):
                 
                 # Normal content, no tool call - but return in vLLM format
                 if delta_text.strip():
-                    # Only send as tool call if we have a function name
-                    if self.current_function_name:
+                    # Only send as tool call if we have a function name and ID
+                    if self.current_function_name and self.current_tool_id:
                         return ChatCompletionMessage(
                             role="assistant", 
                             name=None,
@@ -733,17 +780,8 @@ class Qwen3CoderToolParser(ToolParser):
                                 type="function",
                                 id=str(self.current_tool_id),
                                 index=0,
-                                function=ChatFunctionCall(name=self.current_function_name, arguments=delta_text)
+                                function=ChatFunctionCall(name=self.current_function_name, arguments="")
                             )],
-                            tool_call_id=None
-                        )
-                    else:
-                        # No function name yet - return as plain content
-                        return ChatCompletionMessage(
-                            content="",
-                            role="assistant", 
-                            name=None,
-                            tool_calls=[],
                             tool_call_id=None
                         )
                 
@@ -904,8 +942,8 @@ class Qwen3CoderToolParser(ToolParser):
                 
                 # Check for closing tag to finalize the parameter and build complete JSON
                 if "</parameter>" in tool_text:
-                    # Build proper JSON string
-                    arguments_json = json.dumps({self.current_param_name: self.current_param_value})
+                    self.in_param = False
+                    self.current_param_value = ""
                     return ChatCompletionMessage(
                         content="",
                         role="assistant", 
@@ -914,12 +952,10 @@ class Qwen3CoderToolParser(ToolParser):
                             type="function",
                             id=str(self.current_tool_id),
                             index=0,  # Always use index 0 for first (and only) tool call
-                            function=ChatFunctionCall(name=self.current_function_name, arguments=arguments_json)
+                            function=ChatFunctionCall(name=self.current_function_name, arguments="")
                         )],
                         tool_call_id=None
                     )
-                    self.in_param = False
-                    self.current_param_value = ""
                 # Return incremental updates during parameter accumulation
                 return ChatCompletionMessage(
                     content="",
@@ -929,7 +965,7 @@ class Qwen3CoderToolParser(ToolParser):
                         type="function",
                         id=str(self.current_tool_id),
                         index=0,
-                        function=ChatFunctionCall(name=self.current_function_name, arguments=self.current_param_value)
+                        function=ChatFunctionCall(name=self.current_function_name, arguments="")
                     )],
                     tool_call_id=None
                 )
@@ -952,28 +988,56 @@ class Qwen3CoderToolParser(ToolParser):
                         parsed_tool = self._parse_tool_call(
                             func_content, self.streaming_request.tools
                             if self.streaming_request else None)
+                        
+                        # Only create tool call response if parsing succeeded and validation passed
                         if parsed_tool:
                             # Update existing entry in prev_tool_call_arr with complete arguments
                             for i, tool in enumerate(self.prev_tool_call_arr):
                                 if tool.get("name") == parsed_tool.function.name:
                                     self.prev_tool_call_arr[i]["arguments"] = parsed_tool.function.arguments
                                     break
-                    except Exception:
-                        pass  # Ignore parsing errors during streaming
+                        else:
+                            # Parsing failed or validation rejected - don't return a tool call
+                            logger.debug(f"Streaming tool call parsing failed for {self.current_function_name}, not creating response")
+                            # Return empty message to maintain structure but without tool_calls
+                            return ChatCompletionMessage(
+                                content="",
+                                role="assistant", 
+                                name=None,
+                                tool_calls=[]
+                            )
+                    except Exception as e:
+                        logger.warning(f"Exception during streaming tool call parsing: {e}")
+                        # Return empty message on exception
+                        return ChatCompletionMessage(
+                            content="",
+                            role="assistant", 
+                            name=None,
+                            tool_calls=[]
+                        )
 
                 # Close JSON - don't add literal '}' to arguments
-                return ChatCompletionMessage(
-                    content="",
-                    role="assistant", 
-                    name=None,
-                    tool_calls=[ChatToolCall(
-                        type="function",
-                        id=str(self.current_tool_id),
-                        index=0,
-                        function=ChatFunctionCall(name=self.current_function_name, arguments="{}")
-                    )],
-                    tool_call_id=None
-                )
+                if parsed_tool:
+                    return ChatCompletionMessage(
+                        content="",
+                        role="assistant", 
+                        name=None,
+                        tool_calls=[ChatToolCall(
+                            type="function",
+                            id=str(self.current_tool_id),
+                            index=0,
+                            function=ChatFunctionCall(name=self.current_function_name, arguments=parsed_tool.function.arguments)
+                        )],
+                        tool_call_id=None
+                    )
+                else:
+                    # Should not reach here if we handled parsed_tool == None above, but be safe
+                    return ChatCompletionMessage(
+                        content="",
+                        role="assistant", 
+                        name=None,
+                        tool_calls=[]
+                    )
             
         # Return empty message to maintain structure when no tool call detected
         return ChatCompletionMessage(

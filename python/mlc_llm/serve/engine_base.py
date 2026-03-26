@@ -941,17 +941,31 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
                         
                         # Always include arguments as they change incrementally
                         if hasattr(first_tool_call.function, 'arguments'):
-                            tool_delta['arguments'] = first_tool_call.function.arguments
-                            
-                        # Include id only once when starting
+                            prev_args = prev_state.get('arguments', '')
+                            current_args = first_tool_call.function.arguments
+                            # Only send delta if arguments actually changed
+                            if current_args != prev_args:
+                                tool_delta['arguments'] = current_args
+                        
+                        # Include id only once when starting a new tool call
                         if not prev_state.get('sent_id'):
-                            tool_delta['id'] = str(getattr(first_tool_call, 'id', ''))
+                            # Use the stored ID from previous state for consistency, or get fresh one
+                            tool_call_id = prev_state.get('tool_call_id') or str(getattr(first_tool_call, 'id', ''))
+                            tool_delta['id'] = tool_call_id
                             engine_state._prev_streaming_tool_state.setdefault(request_id + f"_{i}", {})['sent_id'] = True
-                            
+                        
+                        # Only create delta if something actually changed
+                        has_changes = bool(tool_delta.get('id') or tool_delta.get('arguments'))
+                        
+                        if not has_changes and prev_state:
+                            # Nothing changed - skip this chunk to avoid empty deltas
+                            logger.debug(f"Skipping streaming chunk for {request_id}_{i} - no changes detected (prev: {prev_state}, current: {tool_delta})")
+                            continue
+                        
                         delta_message = openai_api_protocol.ChatCompletionMessage(
                             content="",
                             role="assistant"
-                        ) if (not tool_delta and 'arguments' not in tool_delta) else openai_api_protocol.ChatCompletionMessage(
+                        ) if not has_changes else openai_api_protocol.ChatCompletionMessage(
                             content="",
                             role="assistant",
                             tool_calls=[openai_api_protocol.ChatToolCall(
@@ -962,23 +976,32 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
                         )
                     else:
                         # First chunk - include initial structure
+                        # Use the actual arguments from tool parser (which now validates empty dicts)
+                        current_args = first_tool_call.function.arguments if hasattr(first_tool_call.function, 'arguments') else "{}"
                         delta_message = openai_api_protocol.ChatCompletionMessage(
                             content="",
                             role="assistant",
                             tool_calls=[openai_api_protocol.ChatToolCall(
                                 type="function",
                                 index=0,
-                                function=openai_api_protocol.ChatFunctionCall(name=first_tool_call.function.name, arguments="{}")
+                                function=openai_api_protocol.ChatFunctionCall(name=first_tool_call.function.name, arguments=current_args)
                             )]
                         )
                     
                     # Track current state for next comparison
                     if not hasattr(engine_state, '_prev_streaming_tool_state'):
                         engine_state._prev_streaming_tool_state = {}
-                    engine_state._prev_streaming_tool_state[request_id + f"_{i}"] = {
-                        'function': {'name': first_tool_call.function.name} if hasattr(first_tool_call.function, 'name') else {},
-                        'arguments': first_tool_call.function.arguments if hasattr(first_tool_call.function, 'arguments') else ""
-                    }
+                    
+                    tool_call_id = getattr(first_tool_call, 'id', None)
+                    if tool_call_id:
+                        # Store tool call ID for consistency across chunks
+                        state_key = request_id + f"_{i}"
+                        if state_key not in engine_state._prev_streaming_tool_state:
+                            engine_state._prev_streaming_tool_state[state_key] = {}
+                        engine_state._prev_streaming_tool_state[state_key]['tool_call_id'] = tool_call_id
+                    
+                    engine_state._prev_streaming_tool_state.setdefault(request_id + f"_{i}", {})['function'] = {'name': first_tool_call.function.name} if hasattr(first_tool_call.function, 'name') else {}
+                    engine_state._prev_streaming_tool_state[request_id + f"_{i}"]['arguments'] = first_tool_call.function.arguments if hasattr(first_tool_call.function, 'arguments') else ""
                 elif not hasattr(tool_parser_result, 'tool_calls') or len(tool_parser_result.tool_calls) == 0:
                     # Tool parser result with empty/no tool calls - remove tool_calls field
                     delta_message = openai_api_protocol.ChatCompletionMessage(
@@ -1395,25 +1418,22 @@ def process_function_call_output(
                             has_valid_args = False
                             break
                     
-                    tool_calls_list[i] = result.tool_calls
-                    if has_valid_args:
-                        logger.info(f"Response {i}: Valid tool calls detected, setting finish_reason='tool_calls'")
-                        finish_reasons[i] = "tool_calls"
-                        _seen_valid_tool_call[i] = True
-                    else:
-                        # If we already saw a valid tool call, don't add empty ones during streaming
-                        if _seen_valid_tool_call[i]:
-                            logger.warning(f"Response {i}: Skipping duplicate empty tool call after valid one")
-                            tool_calls_list[i] = []
-                        logger.info(f"Response {i}: Invalid/empty arguments detected, setting finish_reason='stop'")
-                        finish_reasons[i] = "stop"  # Treat as regular response
+                    # Log final state for this response (before clearing)
+                    logger.info(f"Response {i} PRE-CLEAR: tools_called={result.tools_called}, has_valid_args={has_valid_args}, tool_calls_count={len(tool_calls_list[i]) if i < len(tool_calls_list) else 0}, finish_reason={finish_reasons[i]}")
                     
-                    # Log final state for this response
-                    logger.info(f"Response {i} FINAL: tool_calls_count={len(tool_calls_list[i]) if i < len(tool_calls_list) else 0}, finish_reason={finish_reasons[i]}, content_length={len(content_list[i]) if i < len(content_list) else 0}")
                     # Clear tool calls when arguments are empty to prevent streaming incomplete tool calls
                     if not has_valid_args:
                         logger.info(f"Response {i}: Clearing tool_calls_list[{i}] due to invalid arguments - prevents empty {{}} tool calls from appearing in streaming")
                         tool_calls_list[i] = []
+                        # If we have empty args but tools_called=True, set finish_reason='tool_calls'
+                        if result.tools_called:
+                            logger.info(f"Response {i}: tools_called=True with empty args - setting finish_reason='tool_calls' instead of 'stop'")
+                            finish_reasons[i] = "tool_calls"
+                    elif result.tools_called:
+                        logger.info(f"Response {i}: Valid tool calls detected, keeping finish_reason='tool_calls'")
+                    
+                    # Log final state for this response
+                    logger.info(f"Response {i} FINAL: tools_called={result.tools_called}, tool_calls_count={len(tool_calls_list[i]) if i < len(tool_calls_list) else 0}, finish_reason={finish_reasons[i]}, content_length={len(content_list[i]) if i < len(content_list) else 0}")
                     content_list[i] = ""
                     continue
                 elif not result.tools_called or len(result.tool_calls or []) == 0:
