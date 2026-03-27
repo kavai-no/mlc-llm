@@ -54,8 +54,8 @@ See `.github/instructions/testing.instructions.md` for comprehensive testing pat
 - Best practices for test organization
 
 ## Reference Files
-- `reference_response_structure.txt` - Expected format for Qwen3Coder tool call responses
-- `qwen3coder.jinja` - Jinja template for rendering Qwen3 conversation prompts with tool support
+- `tests/python/serve/reference_response_structure.txt` - Expected format for Qwen3Coder tool call responses
+- `tests/python/serve/templates/qwen3coder.jinja` - Jinja template for rendering Qwen3 conversation prompts with tool support
 - `vllm_reference.py` - Reference implementation from vLLM project showing expected behavior patterns
 
 ## Qwen3 Coder Tool Parser Implementation
@@ -69,9 +69,18 @@ See `.github/instructions/testing.instructions.md` for comprehensive testing pat
 2. **XML Format**: Parser generates XML for tool calls, not JSON
 3. **Streaming Support**: Enhanced streaming state tracking required for real-time responses
 4. **Validation**: Use `test_validation_fix.py` to verify argument validation logic
-5. **Mock Testing**: Use mocked tokenizer with vocab containing sentinel tokens when testing
-
+5. **Mock Testing**: Use mocked tokenizer with vocab containing sentinel tokens when testing6. **Tool Choice Decision Logic**: The decision about whether to parse tools should happen OUTSIDE the parser. The parser itself should not check for `tool_choice="none"` - that logic belongs in the calling code. This keeps concerns separate and makes the parser a pure extraction/validation component.
+7. Incomplete XML Handling: The parser correctly treats incomplete `<tool_call>` tags (without function definitions) as normal text content, not tool calls.
 ### Template Integration
 - Jinja template handles placement of tool definitions and calls in conversation flow
 - Must coordinate with `MessagePlaceholders.TOOL` and `MessagePlaceholders.FUNCTION`
 - Tool call XML is wrapped in `<tool_call>...</tool_call>` tags
+
+## Test Data Factory (NEW)
+See `.github/instructions/TEST_DATA_FACTORY.md` for comprehensive documentation.
+
+### Usage Guidelines
+1. **Use constants** for standard test cases: `SINGLE_PARAM_XML`, `MULTI_PARAM_XML`, `EMPTY_PARAMS_XML`
+2. **Use fluent builder** when creating custom or varied XML: `XmlToolCallBuilder().with_function(...)`
+3. **Reuse tool factories** to maintain consistency: `create_search_web_tool()`
+4. **Always use proper XML formatting** with newlines matching the actual implementation

@@ -61,11 +61,14 @@ class Qwen3CoderToolParser(ToolParser):
 
         # Regex patterns
         self.tool_call_complete_regex = re.compile(
-            r"<tool_call>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE)
+            r"<tool_call>(.*?)ground",
+            re.DOTALL | re.IGNORECASE)
         self.tool_call_regex = re.compile(
-            r"<tool_call>(.*?)</tool_call>|<tool_call>(.*?)$", re.DOTALL | re.IGNORECASE)
+            r"<tool_call>(.*?)ordon",
+            re.DOTALL | re.IGNORECASE)
         self.tool_call_function_regex = re.compile(
-            r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL | re.IGNORECASE)
+            r"<function=(.*?)</function>|<function=(.*)$",
+            re.DOTALL | re.IGNORECASE)
         self.tool_call_parameter_regex = re.compile(
             r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=<function>)|$)",
             re.DOTALL | re.IGNORECASE)
@@ -349,8 +352,8 @@ class Qwen3CoderToolParser(ToolParser):
 
     def _get_function_calls(self, model_output: str) -> list[str]:
         """Extract function call strings from model output, supporting both wrapped and unwrapped formats."""
-        # First try wrapped format: <tool_call>...<function=...></function>...</tool_call>
-        tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>|<tool_call>(.*?)$", re.DOTALL | re.IGNORECASE)
+        # First try wrapped format: <tool_call>...<function=...></function>...<tool_call>
+        tool_call_regex = re.compile(r"<tool_call>(.*?)<tool_call>|<tool_call>(.*?)$", re.DOTALL | re.IGNORECASE)
         matched_ranges = tool_call_regex.findall(model_output)
         raw_tool_calls = [match[0] if match[0] else match[1] for match in matched_ranges]
         
@@ -379,23 +382,32 @@ class Qwen3CoderToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         """Extract tool calls from model output, supporting vllm format."""
+        print(f"DEBUG: extract_tool_calls called with model_output='{model_output}'")
         self._reset_streaming_state()
         
+        print(f"DEBUG: tool_call_start_token='{self.tool_call_start_token}'")
+        print(f"DEBUG: tool_call_prefix='{self.tool_call_prefix}'")
         # Quick check to avoid unnecessary processing
-        if self.tool_call_prefix not in model_output:  
+        has_function_tag = self.tool_call_prefix in model_output
+        print(f"DEBUG: Checking if '{self.tool_call_prefix}' in '{model_output}': {has_function_tag}")
+        if not has_function_tag:
             logger.info(f"No tool calls detected in model output (length: {len(model_output)})")
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
                 content=model_output
             )
-        
         try:
+            print(f"DEBUG: About to call _get_function_calls with '{model_output}'")
             function_calls = self._get_function_calls(model_output)
+            print(f"DEBUG: _get_function_calls returned {len(function_calls)} items")
             
+            print(f"DEBUG: Found {len(function_calls)} function calls in '{model_output}'")
+            print(f"DEBUG: About to check function_calls length")
             # Enhanced debugging and logging
             logger.debug(f"Extracted {len(function_calls)} function calls from model output (length: {len(model_output)})")
             if len(function_calls) == 0:
+                print(f"DEBUG: No function calls found, returning early with content=model_output")
                 logger.warning(f"No function calls found in model output. Output preview: {model_output[:200]!r}")
                 return ExtractedToolCallInformation(
                     tools_called=False,
@@ -442,15 +454,24 @@ class Qwen3CoderToolParser(ToolParser):
             
             # Enhanced content extraction
             # Look for both tool_call wrapper and direct function= prefix
+            print(f"DEBUG: About to find tool_call_start_token in '{model_output}'")
             content_index = model_output.find(self.tool_call_start_token)
+            print(f"DEBUG: tool_call_start_token='{self.tool_call_start_token}', found at index={content_index}")
             if content_index < 0:
                 content_index = model_output.find(self.tool_call_prefix)
+                print(f"DEBUG: tool_call_prefix='{self.tool_call_prefix}', found at index={content_index}")
+            else:
+                print(f"DEBUG: Using tool_call_start_token index={content_index}")
             
             if content_index >= 0:
-                content = model_output[:content_index].strip()
+                content_before = model_output[:content_index]
+                print(f"DEBUG: model_output[:{content_index}] = '{content_before}'")
+                content = content_before.strip()
+                print(f"DEBUG: After strip, content='{content}', length={len(content)}")
                 # Remove trailing whitespace and newlines
                 while content.endswith('\n') or content.endswith(' '):
                     content = content[:-1]
+                print(f"DEBUG: After while loop, content='{content}', length={len(content)}")
                 logger.debug(f"Extracted content before tool calls (length: {len(content)})")
             else:
                 content = None
@@ -598,12 +619,11 @@ class Qwen3CoderToolParser(ToolParser):
             self._reset_streaming_state()
             self.streaming_request = request
         
-# If no delta text, handle appropriately based on context
+        # If no delta text, handle appropriately based on context
         if not delta_text:
-            # Check if this is an EOS token after all tool calls are complete
-            # We check for tool calls in the text even if is_tool_call_started is False
-            # because it might have been reset after processing all tools
-            
+            # Handle case where there's no delta text - this is a valid edge case in streaming
+            return None  # No meaningful change to send to client
+        
         # Early return if no tools are provided or tool_choice='none'
         if not request.tools or getattr(request, 'tool_choice', None) == "none":
             return ChatCompletionMessage(
@@ -613,62 +633,40 @@ class Qwen3CoderToolParser(ToolParser):
                 tool_calls=[],
                 tool_call_id=None
             )
-            if delta_token_ids and self.tool_call_end_token_id not in delta_token_ids:
-                # Count complete tool calls
-                complete_calls = len(
-                    self.tool_call_complete_regex.findall(current_text))
+        if delta_token_ids and self.tool_call_end_token_id not in delta_token_ids:
+            # Count complete tool calls
+            complete_calls = len(
+                self.tool_call_complete_regex.findall(current_text))
 
-                # If we have completed tool calls and populated prev_tool_call_arr
-                if complete_calls > 0 and len(self.prev_tool_call_arr) > 0:
-                    # Check if all tool calls are closed
-                    open_calls = current_text.count(
-                        self.tool_call_start_token) - current_text.count(
-                            self.tool_call_end_token)
-                    if open_calls == 0:
-                        # Return empty delta message with vLLM format only if there's actual content
-                        if self.current_function_name:
-                            return ChatCompletionMessage(
-                                content="",
-                                role="assistant", 
-                                name=None,
-                                tool_calls=[],
-                                tool_call_id=self._get_current_tool_call_id()
-                            )
-                elif not self.is_tool_call_started and current_text:
-                    # This is a regular content response that's now complete - use vLLM format
-                    return ChatCompletionMessage(
-                        content="",
-                        role="assistant", 
-                        name=None,
-                        tool_calls=[],
-                        tool_call_id=self._get_current_tool_call_id()
-                    )
-                
-                # When tool call has started but we haven't extracted function info yet,
-                # and no other conditions matched, return structured message with empty tool_calls
-                if self.is_tool_call_started and not self.current_function_name:
-                    return ChatCompletionMessage(
-                        content="",
-                        role="assistant",
-                        name=None,
-                        tool_calls=[],
-                        tool_call_id=self._get_current_tool_call_id()
-                    )
+            # If we have completed tool calls and populated prev_tool_call_arr
+            if complete_calls > 0 and len(self.prev_tool_call_arr) > 0:
+                # Check if all tool calls are closed
+                open_calls = current_text.count(
+                    self.tool_call_start_token) - current_text.count(
+                        self.tool_call_end_token)
+                if open_calls == 0:
+                    # Return empty delta message with vLLM format only if there's actual content
+                    if self.current_function_name:
+                        return ChatCompletionMessage(
+                            content="",
+                            role="assistant", 
+                            name=None,
+                            tool_calls=[],
+                            tool_call_id=self._get_current_tool_call_id()
+                        )
+            elif not self.is_tool_call_started and current_text:
+                # This is a regular content response that's now complete - use vLLM format
+                return ChatCompletionMessage(
+                    content="",
+                    role="assistant", 
+                    name=None,
+                    tool_calls=[],
+                    tool_call_id=self._get_current_tool_call_id()
+                )
             
-            # Enhanced check for tool call XML tags - if we only have closing tags or no XML,
-            # this might be a continuation after a completed tool interaction
-            if self.tool_call_end_token in current_text and self.tool_call_start_token not in current_text:
-                # Only closing tag found, likely already processed - skip
-                return None
-            
-            # For regular cases, only return structured message when we have meaningful state
-            if self.is_tool_call_started or self.current_function_name:
-                # We're in the middle of processing tools, but check if we should return None instead
-                # Return None for empty deltas unless we have actual tool call content
-                if not current_text.strip():
-                    return None
-                
-                # We're in the middle of processing tools, return structured message
+            # When tool call has started but we haven't extracted function info yet,
+            # and no other conditions matched, return structured message with empty tool_calls
+            if self.is_tool_call_started and not self.current_function_name:
                 return ChatCompletionMessage(
                     content="",
                     role="assistant",
@@ -676,6 +674,28 @@ class Qwen3CoderToolParser(ToolParser):
                     tool_calls=[],
                     tool_call_id=self._get_current_tool_call_id()
                 )
+        
+        # Enhanced check for tool call XML tags - if we only have closing tags or no XML,
+        # this might be a continuation after a completed tool interaction
+        if self.tool_call_end_token in current_text and self.tool_call_start_token not in current_text:
+            # Only closing tag found, likely already processed - skip
+            return None
+        
+        # For regular cases, only return structured message when we have meaningful state
+        if self.is_tool_call_started or self.current_function_name:
+            # We're in the middle of processing tools, but check if we should return None instead
+            # Return None for empty deltas unless we have actual tool call content
+            if not current_text.strip():
+                return None
+            
+            # We're in the middle of processing tools, return structured message
+            return ChatCompletionMessage(
+                content="",
+                role="assistant",
+                name=None,
+                tool_calls=[],
+                tool_call_id=self._get_current_tool_call_id()
+            )
         self.accumulated_text = current_text
 
         # Check if we need to advance to next tool
@@ -753,17 +773,6 @@ class Qwen3CoderToolParser(ToolParser):
                             tool_call_id=None
                         )
                 
-                # Check if this is just JSON content (tool response) with no function calls
-                # Only skip if we're not in the middle of a tool call and text contains only valid JSON
-                if (not self.is_tool_call_started and current_text.strip() and 
-                    "{" in current_text and "}" in current_text):
-                    try:
-                        parsed = json.loads(current_text)
-                        # This is a tool response, not model output - return None to skip
-                        return None
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                
                 # Return any content before the tool call with proper structure
                 if self.tool_call_start_token in delta_text:
                     content_before = delta_text[:delta_text.index(
@@ -800,16 +809,8 @@ class Qwen3CoderToolParser(ToolParser):
                             tool_call_id=self._get_current_tool_call_id()
                         )
                 # When tool call has started but we haven't extracted function info yet,
-                # and we get whitespace/empty content, check for JSON first
+                # and we get whitespace/empty content
                 if self.is_tool_call_started and not self.current_function_name:
-                    # Check if this is just JSON content (tool response) with no function calls
-                    if current_text.strip() and "{" in current_text and "}" in current_text:
-                        try:
-                            parsed = json.loads(current_text)
-                            # This is a tool response, not model output - return None to skip
-                            return None
-                        except (json.JSONDecodeError, ValueError):
-                            pass
                     # Check if delta is empty - return None for empty deltas
                     if not delta_text.strip():
                         return None
@@ -958,7 +959,7 @@ class Qwen3CoderToolParser(ToolParser):
                             type="function",
                             id=str(self.current_tool_id),
                             index=0,  # Always use index 0 for first tool call
-                            function=ChatFunctionCall(name=self.current_function_name, arguments="{}")
+                            function=ChatFunctionCall(name=self.current_function_name, arguments="")
                         )],
                         tool_call_id=None
                     )
