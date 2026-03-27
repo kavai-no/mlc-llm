@@ -603,6 +603,16 @@ class Qwen3CoderToolParser(ToolParser):
             # Check if this is an EOS token after all tool calls are complete
             # We check for tool calls in the text even if is_tool_call_started is False
             # because it might have been reset after processing all tools
+            
+        # Early return if no tools are provided or tool_choice='none'
+        if not request.tools or getattr(request, 'tool_choice', None) == "none":
+            return ChatCompletionMessage(
+                content=delta_text.strip(),
+                role="assistant",
+                name=None,
+                tool_calls=[],
+                tool_call_id=None
+            )
             if delta_token_ids and self.tool_call_end_token_id not in delta_token_ids:
                 # Count complete tool calls
                 complete_calls = len(
@@ -653,6 +663,11 @@ class Qwen3CoderToolParser(ToolParser):
             
             # For regular cases, only return structured message when we have meaningful state
             if self.is_tool_call_started or self.current_function_name:
+                # We're in the middle of processing tools, but check if we should return None instead
+                # Return None for empty deltas unless we have actual tool call content
+                if not current_text.strip():
+                    return None
+                
                 # We're in the middle of processing tools, return structured message
                 return ChatCompletionMessage(
                     content="",
@@ -681,6 +696,11 @@ class Qwen3CoderToolParser(ToolParser):
                 if self.current_tool_index >= tool_starts:
                     # No more tool calls
                     self.is_tool_call_started = False
+                
+                # Check if we should return None for empty content
+                if not delta_text.strip() and not current_text.strip():
+                    return None
+                
                 # Continue processing next tool - return structured message
                 return ChatCompletionMessage(
                     content="",
@@ -790,6 +810,10 @@ class Qwen3CoderToolParser(ToolParser):
                             return None
                         except (json.JSONDecodeError, ValueError):
                             pass
+                    # Check if delta is empty - return None for empty deltas
+                    if not delta_text.strip():
+                        return None
+                    
                     return ChatCompletionMessage(
                         content="",
                         role="assistant",
@@ -836,6 +860,10 @@ class Qwen3CoderToolParser(ToolParser):
                 return None
             
             # Only return structured message if we have meaningful state
+            # Check if delta is actually empty - if so, skip it entirely
+            if not delta_text.strip():
+                return None
+            
             if self.is_tool_call_started or (self.current_function_name and self.current_tool_id):
                 return ChatCompletionMessage(
                     content="",
@@ -853,6 +881,10 @@ class Qwen3CoderToolParser(ToolParser):
         tool_starts_count = current_text.count(self.tool_call_start_token)
         if self.current_tool_index >= tool_starts_count:
             # We're past all tool calls, shouldn't be here
+            # But return None for empty deltas to avoid spamming the client
+            if not delta_text.strip():
+                return None
+            
             return ChatCompletionMessage(
                 content="",
                 role="assistant",
