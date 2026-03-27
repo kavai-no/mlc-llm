@@ -351,7 +351,7 @@ async def request_chat_completion(
         # Create non-None version of finish_reasons for the function signature
         safe_finish_reasons = [fr if fr is not None else "stop" for fr in finish_reasons]
         use_function_calling, tool_calls_list, content_list = engine_base.process_function_call_output(
-            [buffer_text or "<function="],  # Use buffer content if available
+            [buffer_text] if buffer_text else [],  # Use buffer content if available
             safe_finish_reasons,
             tool_parser=tool_parser
         )

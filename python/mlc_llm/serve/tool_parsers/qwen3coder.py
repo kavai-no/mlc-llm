@@ -209,6 +209,13 @@ class Qwen3CoderToolParser(ToolParser):
     def _generate_tool_call_id(self) -> str:
         """Generate a unique tool call ID."""
         return f"call_{uuid.uuid4().hex[:24]}"
+    
+    def _get_current_tool_call_id(self) -> Optional[str]:
+        """Get the current tool call ID, generating one if needed."""
+        # Only generate new ID when we have a function name but no existing ID
+        if self.current_function_name and not self.current_tool_id:
+            self.current_tool_id = self._generate_tool_call_id()
+        return self.current_tool_id
 
     def _reset_streaming_state(self):
         """Reset all streaming state."""
@@ -591,7 +598,7 @@ class Qwen3CoderToolParser(ToolParser):
             self._reset_streaming_state()
             self.streaming_request = request
         
-        # If no delta text, return structured message instead of None
+# If no delta text, handle appropriately based on context
         if not delta_text:
             # Check if this is an EOS token after all tool calls are complete
             # We check for tool calls in the text even if is_tool_call_started is False
@@ -615,10 +622,8 @@ class Qwen3CoderToolParser(ToolParser):
                                 role="assistant", 
                                 name=None,
                                 tool_calls=[],
-                                tool_call_id=None
+                                tool_call_id=self._get_current_tool_call_id()
                             )
-                        # No meaningful state, return None to skip this chunk
-                        return None
                 elif not self.is_tool_call_started and current_text:
                     # This is a regular content response that's now complete - use vLLM format
                     return ChatCompletionMessage(
@@ -626,38 +631,19 @@ class Qwen3CoderToolParser(ToolParser):
                         role="assistant", 
                         name=None,
                         tool_calls=[],
-                        tool_call_id=None
+                        tool_call_id=self._get_current_tool_call_id()
                     )
                 
-            # When tool call has started but we haven't extracted function info yet,
-            # and no other conditions matched, return structured message with empty tool_calls
-            if self.is_tool_call_started and not self.current_function_name:
-                # Check if the accumulated text contains only tool responses/results
-                # If so, there's nothing for us to parse - return None
-                if current_text.strip() and "{" in current_text and "}" in current_text:
-                    try:
-                        json.loads(current_text)
-                        # This looks like a JSON object (tool response), not model output
-                        # Return None to skip generating empty deltas
-                        return None
-                    except:
-                        pass
-                return ChatCompletionMessage(
-                    content="",
-                    role="assistant",
-                    name=None,
-                    tool_calls=[],
-                    tool_call_id=self.current_tool_id if self.current_tool_id else None
-                )
-            
-            # Check if we're seeing only JSON responses (tool results) with no model output
-            if current_text.strip() and "{" in current_text and "}" in current_text:
-                try:
-                    json.loads(current_text)
-                    # This is a JSON object, likely a tool response - skip it
-                    return None
-                except (json.JSONDecodeError, ValueError):
-                    pass
+                # When tool call has started but we haven't extracted function info yet,
+                # and no other conditions matched, return structured message with empty tool_calls
+                if self.is_tool_call_started and not self.current_function_name:
+                    return ChatCompletionMessage(
+                        content="",
+                        role="assistant",
+                        name=None,
+                        tool_calls=[],
+                        tool_call_id=self._get_current_tool_call_id()
+                    )
             
             # Enhanced check for tool call XML tags - if we only have closing tags or no XML,
             # this might be a continuation after a completed tool interaction
@@ -673,13 +659,8 @@ class Qwen3CoderToolParser(ToolParser):
                     role="assistant",
                     name=None,
                     tool_calls=[],
-                    tool_call_id=self.current_tool_id if self.current_tool_id else None
+                    tool_call_id=self._get_current_tool_call_id()
                 )
-            
-            # No meaningful state or content - return None to skip empty delta
-            return None
-
-        # Update accumulated text
         self.accumulated_text = current_text
 
         # Check if we need to advance to next tool
@@ -706,7 +687,7 @@ class Qwen3CoderToolParser(ToolParser):
                     role="assistant",
                     name=None,
                     tool_calls=[],
-                    tool_call_id=self.current_tool_id if self.current_tool_id else None
+                    tool_call_id=self._get_current_tool_call_id()
                 )
                 
             # When tool call has started but we haven't extracted function info yet,
@@ -718,9 +699,8 @@ class Qwen3CoderToolParser(ToolParser):
                     func_match = re.search(r'<function=(.*?)>', current_text, re.IGNORECASE)
                     if func_match:
                         self.current_function_name = func_match.group(1).strip()
-                        # Only generate tool ID once when function name is first detected
-                        if not self.current_tool_id:
-                            self.current_tool_id = self._generate_tool_call_id()
+                        # Get or generate tool call ID
+                        _ = self._get_current_tool_call_id()
                         return ChatCompletionMessage(
                             content="",
                             role="assistant", 
@@ -738,9 +718,8 @@ class Qwen3CoderToolParser(ToolParser):
                     func_match = re.search(r'<function=(.*)$', current_text, re.IGNORECASE)
                     if func_match:
                         self.current_function_name = func_match.group(1).strip()
-                        # Only generate tool ID once when function name is first detected
-                        if not self.current_tool_id:
-                            self.current_tool_id = self._generate_tool_call_id()
+                        # Get or generate tool call ID
+                        _ = self._get_current_tool_call_id()
                         return ChatCompletionMessage(
                             content="",
                             role="assistant", 
@@ -755,7 +734,9 @@ class Qwen3CoderToolParser(ToolParser):
                         )
                 
                 # Check if this is just JSON content (tool response) with no function calls
-                if current_text.strip() and "{" in current_text and "}" in current_text:
+                # Only skip if we're not in the middle of a tool call and text contains only valid JSON
+                if (not self.is_tool_call_started and current_text.strip() and 
+                    "{" in current_text and "}" in current_text):
                     try:
                         parsed = json.loads(current_text)
                         # This is a tool response, not model output - return None to skip
@@ -796,7 +777,7 @@ class Qwen3CoderToolParser(ToolParser):
                             role="assistant", 
                             name=None,
                             tool_calls=[],
-                            tool_call_id=self.current_tool_id if self.current_tool_id else None
+                            tool_call_id=self._get_current_tool_call_id()
                         )
                 # When tool call has started but we haven't extracted function info yet,
                 # and we get whitespace/empty content, check for JSON first
@@ -814,7 +795,7 @@ class Qwen3CoderToolParser(ToolParser):
                         role="assistant",
                         name=None,
                         tool_calls=[],
-                        tool_call_id=self.current_tool_id if self.current_tool_id else None
+                        tool_call_id=self._get_current_tool_call_id()
                     )
                 
                 # Normal content, no tool call - but return in vLLM format
@@ -843,21 +824,29 @@ class Qwen3CoderToolParser(ToolParser):
                     tool_call_id=None
                 )
             elif delta_text.strip() == "" and current_text.startswith(self.tool_call_start_token):
-                # Return empty structured message for whitespace in tool call
+                # Return empty structured message for whitespace in tool call, but only if we have state
+                if self.is_tool_call_started or (self.current_function_name and self.current_tool_id):
+                    return ChatCompletionMessage(
+                        role="assistant", 
+                        name=None,
+                        tool_calls=[],
+                        tool_call_id=self._get_current_tool_call_id()
+                    )
+                # No meaningful state, skip this empty whitespace delta
+                return None
+            
+            # Only return structured message if we have meaningful state
+            if self.is_tool_call_started or (self.current_function_name and self.current_tool_id):
                 return ChatCompletionMessage(
-                    role="assistant", 
+                    content="",
+                    role="assistant",
                     name=None,
                     tool_calls=[],
-                    tool_call_id=None
+                    tool_call_id=self._get_current_tool_call_id()
                 )
             
-            return ChatCompletionMessage(
-                content="",
-                role="assistant",
-                name=None,
-                tool_calls=[],
-                tool_call_id=self.current_tool_id if self.current_tool_id else None
-            )
+            # No meaningful state, skip this delta
+            return None
         
         # Check if we're between tool calls (waiting for next one)
         # Count tool calls we've seen vs processed
@@ -869,7 +858,7 @@ class Qwen3CoderToolParser(ToolParser):
                 role="assistant",
                 name=None,
                 tool_calls=[],
-                tool_call_id=self.current_tool_id if self.current_tool_id else None
+                tool_call_id=self._get_current_tool_call_id()
             )
         # Need to find the correct tool call based on current_tool_index
         tool_starts = []
@@ -888,7 +877,7 @@ class Qwen3CoderToolParser(ToolParser):
                 role="assistant",
                 name=None,
                 tool_calls=[],
-                tool_call_id=self.current_tool_id if self.current_tool_id else None
+                tool_call_id=self._get_current_tool_call_id()
             )
 
         tool_start_idx = tool_starts[self.current_tool_index]
@@ -911,7 +900,8 @@ class Qwen3CoderToolParser(ToolParser):
                 if func_end != -1:
                     # Found complete function name
                     self.current_function_name = tool_text[func_start:func_end]
-                    self.current_tool_id = self._generate_tool_call_id()
+                    # Get or generate tool call ID
+                    _ = self._get_current_tool_call_id()
                     self.header_sent = True
                     self.in_function = True
 
@@ -946,7 +936,7 @@ class Qwen3CoderToolParser(ToolParser):
                 content="",
                 role="assistant",
                 tool_calls=[],
-                tool_call_id=self.current_tool_id if self.current_tool_id else None
+                tool_call_id=self._get_current_tool_call_id()
             )
 
         # We've sent header, now handle function body
@@ -982,7 +972,7 @@ class Qwen3CoderToolParser(ToolParser):
                     role="assistant",
                     name=None,
                     tool_calls=[],
-                    tool_call_id=self.current_tool_id if self.current_tool_id else None
+                    tool_call_id=self._get_current_tool_call_id()
                 )
             elif self.in_param:
                 # Accumulate parameter value for JSON building
@@ -1025,7 +1015,7 @@ class Qwen3CoderToolParser(ToolParser):
                     role="assistant",
                     name=None,
                     tool_calls=[],
-                    tool_call_id=self.current_tool_id if self.current_tool_id else None
+                    tool_call_id=self._get_current_tool_call_id()
                 )
 
             # Check for function end in accumulated text
@@ -1103,7 +1093,7 @@ class Qwen3CoderToolParser(ToolParser):
             role="assistant", 
             name=None,
             tool_calls=[],
-            tool_call_id=self.current_tool_id if self.current_tool_id else None
+            tool_call_id=self._get_current_tool_call_id()
         )
     
     def render_tool_calls(self, tool_calls: List[ChatToolCall]) -> str:
