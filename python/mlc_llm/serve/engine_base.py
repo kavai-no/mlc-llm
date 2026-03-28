@@ -1453,10 +1453,20 @@ def process_function_call_output(
                         tool_calls_list[i] = []
                     elif result.tools_called:
                         logger.info(f"Response {i}: Valid tool calls detected, keeping finish_reason='tool_calls'")
+                        # Populate tool_calls_list before continuing
+                        if hasattr(result, 'tool_calls') and result.tool_calls:
+                            tool_calls_list[i] = result.tool_calls
                     
                     # Log final state for this response
                     logger.info(f"Response {i} FINAL: tools_called={result.tools_called}, tool_calls_count={len(tool_calls_list[i]) if i < len(tool_calls_list) else 0}, finish_reason={finish_reasons[i]}, content_length={len(content_list[i]) if i < len(content_list) else 0}")
-                    content_list[i] = ""
+                    # Preserve content when tools are called - don't clear it
+                    if has_valid_args and result.tools_called:
+                        logger.info(f"Response {i}: Preserving content before tool calls: '{result.content[:50]}...'")
+                        # Keep the original content from parser result instead of clearing
+                        if result.content:
+                            content_list[i] = result.content
+                    else:
+                        content_list[i] = ""
                     continue
                 elif not result.tools_called or len(result.tool_calls or []) == 0:
                     # Qwen3Coder parser found NO valid tool calls, but TVM might have thought there were some.
