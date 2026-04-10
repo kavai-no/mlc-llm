@@ -130,6 +130,14 @@ def _process_model_args(
 
         if conversation is None:
             conversation = mlc_chat_config.conv_template
+        else:
+            # If we already have a conversation object (e.g. from an existing session), 
+            # ensure the template from the config is applied/synchronized.
+            conversation.system_message = mlc_chat_config.system_message
+            conversation.role_templates.update(mlc_chat_config.role_templates)
+            # Use hydration pattern: store parser name as string for dynamic instantiation
+            if hasattr(mlc_chat_config.conv_template, 'tool_parser') and mlc_chat_config.conv_template.tool_parser:
+                conversation.tool_parser = mlc_chat_config.conv_template.tool_parser
 
         if model.model_lib is not None:
             # do model lib search if the model lib is provided

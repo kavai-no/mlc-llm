@@ -60,8 +60,18 @@ class MLCChatConfig(BaseModel):
     bos_token_id: Optional[int] = None
     eos_token_id: Optional[Union[int, List[int]]] = None
 
-    field_model_task: Literal["chat", "embedding"] = Field(default="chat", alias="model_task")
     embedding_metadata: Optional[Dict[str, Any]] = None
+
+    def model_dump(self, **kwargs) -> Dict[str, Any]:
+        """Convert to dictionary, excluding hydrated parser instances."""
+        data = super().model_dump(**kwargs)
+        # If conv_template has a tool_parser_instance, exclude it from serialization
+        if 'conv_template' in data and isinstance(data['conv_template'], dict):
+            conv_data = data['conv_template']
+            if 'tool_parser_instance' in conv_data:
+                conv_data = {k: v for k, v in conv_data.items() if k != 'tool_parser_instance'}
+                data['conv_template'] = conv_data
+        return data
 
     def get_system_defaults_for_missing_fields(self) -> Dict[str, Any]:
         """Apply system default value for fields that are None

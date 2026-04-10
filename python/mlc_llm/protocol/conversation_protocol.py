@@ -2,9 +2,8 @@
 
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
-
-from pydantic import BaseModel, Field, field_validator
-
+from abc import ABC, abstractmethod
+from pydantic import BaseModel, Field, field_validator, ConfigDict, model_validator
 
 # The message placeholders in the message prompts according to roles.
 class MessagePlaceholders(Enum):
@@ -16,21 +15,31 @@ class MessagePlaceholders(Enum):
     TOOL = "{tool_message}"
     FUNCTION = "{function_string}"
 
+class BaseToolParser(ABC):
+    """Abstract base class for tool parsers."""
+    @abstractmethod
+    def parse(self, text: str) -> Any:
+        pass
+
+    @abstractmethod
+    def parse_streaming(self, chunk: str) -> Any:
+        pass
 
 T = TypeVar("T", bound="BaseModel")
 
 
 class Conversation(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     """Class that specifies the convention template of conversation
     and contains the conversation history.
 
     Given a conversation template, the corresponding prompt generated out
     from it is usually in the following format:
 
-      <<system>><<messages[0][0]>><<role_content_sep>><<messages[0][1]>><<seps[0]>>
-                <<messages[1][0]>><<role_content_sep>><<messages[1][1]>><<seps[1]>>
+      <<system>><<messages[0][0]>><<role_content_sep>><<messages[0][1]>><<seps[0]]>
+                <<messages[1][0]>><<role_content_sep>><<messages[1][1]>><<seps[1]]>
                 ...
-                <<messages[2][0]>><<role_content_sep>><<messages[2][1]>><<seps[0]>>
+                <<messages[2][0]>><<role_content_sep>><<messages[2][1]>><<seps[0]]>
                 <<roles[1]>><<role_empty_sep>>
     """
 
@@ -79,8 +88,14 @@ class Conversation(BaseModel):
 
     # Function call fields
     function_string: str = ""
-    # whether using function calling or not, helps check for output message format in API call
-    use_function_calling: bool = False
+    # The list of available tools for tool calling (used in system prompt)
+    tools: List[Dict[str, Any]] = Field(default_factory=lambda: [])
+    # The parser name to use for tool calls (must be registered in PARSER_REGISTRY).
+    tool_parser: Optional[str] = None
+    # The hydrated parser instance used during runtime.
+    tool_parser_instance: Optional[Any] = None
+    # Whether to use function calling
+    use_function_calling: Optional[bool] = None
 
     def __init__(self, role_templates: Optional[Dict[str, str]] = None, **kwargs):
         # Defaults templates which would be overridden by model specific templates
@@ -101,14 +116,17 @@ class Conversation(BaseModel):
             raise ValueError("seps should have size 1 or 2.")
         return seps
 
-    def to_json_dict(self) -> Dict[str, Any]:
-        """Convert to a json dictionary"""
-        return self.model_dump(by_alias=True, exclude_none=True)
 
-    @classmethod
-    def from_json_dict(cls: Type[T], json_dict: Dict[str, Any]) -> T:
-        """Convert from a json dictionary"""
-        return Conversation.model_validate(json_dict)
+
+    @model_validator(mode='after')
+    def hydrate_parser(self) -> 'Conversation':
+        if self.tool_parser:
+            from mlc_llm.serve.tool_parser import get_parser_instance
+            hydrated = get_parser_instance(self.tool_parser)
+            if hydrated:
+                object.__setattr__(self, 'tool_parser_instance', hydrated)
+        return self
+
 
     # pylint: disable=too-many-branches
     def as_prompt(self, config=None) -> List[Any]:
@@ -178,6 +196,35 @@ class Conversation(BaseModel):
                     image_url = _get_url_from_item(item)
                     message_list.append(data.ImageData.from_url(image_url, config))
                     message_list.append("\n")
+                elif item["type"] == "tool_call":
+                    # Render tool call using the function_string template
+                    if self.function_string:
+                        # Build the tool call XML from the tool_call data
+                        tool_name = item.get("name", "unknown")
+                        parameters = item.get("parameters", {})
+                        
+                        # Convert parameters to individual <parameter> tags
+                        param_xmls = []
+                        for param_name, param_value in parameters.items():
+                            param_xmls.append(
+                                self.function_string.replace(
+                                    "{function_name}", tool_name
+                                ).replace(
+                                    "{param_name}", str(param_name)
+                                ).replace(
+                                    "{param_value}", str(param_value)
+                                )
+                            )
+                        
+                        # Join all parameter XMLs for this tool call
+                        if param_xmls:
+                            message_list.append("\n".join(param_xmls))
+                    else:
+                        raise ValueError("function_string must be defined to render tool calls")
+                elif item["type"] == "tool_result":
+                    # Render tool result in XML format
+                    content = item.get("content", "")
+                    message_list.append(f"<tool_response>{content}</tool_response>")
                 else:
                     raise ValueError(f"Unsupported content type: {item['type']}")
 
@@ -187,13 +234,59 @@ class Conversation(BaseModel):
 
         if not any(isinstance(item, data.ImageData) for item in message_list):
             # Replace the last function string placeholder with actual function string
-            prompt[0] = self.function_string.join(
-                prompt[0].rsplit(MessagePlaceholders.FUNCTION.value, 1)
-            )
-            # Replace with remaining function string placeholders with empty string
+            parts = prompt[0].rsplit(MessagePlaceholders.FUNCTION.value, 1)
+            if len(parts) == 2:
+                # If function_string is not empty, use it as content (not separator)
+                if self.function_string:
+                    prompt[0] = parts[0] + self.function_string + parts[1]
+                else:
+                    # Empty function string - just remove the placeholder
+                    prompt[0] = parts[0] + parts[1]
+            # Replace remaining function string placeholders with empty string
             prompt[0] = prompt[0].replace(MessagePlaceholders.FUNCTION.value, "")
 
         return prompt
+
+    @classmethod
+    def from_json_dict(cls: Type[T], json_dict: Dict[str, Any]) -> T:
+        """
+        Create a Conversation instance from a JSON dictionary.
+        
+        This method is used for hydration - loading a conversation template
+        from serialized JSON data and automatically hydrating the tool_parser
+        instance if specified.
+        
+        Parameters
+        ----------
+        json_dict : Dict[str, Any]
+            The JSON dictionary containing conversation data
+            
+        Returns
+        -------
+        Conversation
+            A new Conversation instance with hydrated tool parser
+        """
+    @classmethod
+    def from_json_dict(cls, json_dict):
+        conv = cls.model_validate(json_dict)
+        
+        return conv
+
+    def model_dump_json(self, **kwargs) -> str:
+        """Convert to JSON string, excluding the hydrated parser instance."""
+        import json
+        data = self.model_dump(**kwargs)
+        if "tool_parser_instance" in data:
+            del data["tool_parser_instance"]
+        return json.dumps(data)
+    
+    def to_json_dict(self) -> dict:
+        """Convert to JSON-compatible dict, excluding the hydrated parser instance."""
+        import json
+        data = self.model_dump()
+        if "tool_parser_instance" in data:
+            del data["tool_parser_instance"]
+        return data
 
 
 def _get_url_from_item(item: Dict) -> str:
@@ -204,7 +297,7 @@ def _get_url_from_item(item: Dict) -> str:
     elif isinstance(item["image_url"], dict):
         assert (
             "url" in item["image_url"]
-        ), "Content image_url item should be a string or a dict with a url field"  # pylint: disable=line-too-long
+        ), "Content image_url item should be a string or a dict with a url field"
         image_url = item["image_url"]["url"]
     else:
         raise ValueError(
