@@ -869,6 +869,10 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
                 parse_result = conv_template.tool_parser_instance.parse_streaming(delta_output.delta_text)
                 if parse_result and parse_result.get("type") == "complete_tool_call":
                     tool_calls = parse_result["data"]
+                elif parse_result and parse_result.get("type") == "partial_tool_call":
+                    # Accumulate the text part of partial tool calls into delta_text 
+                    # so the client sees the progress, but don't set tool_calls yet.
+                    delta_output.delta_text += parse_result.get("data", "")
             except Exception:
                 pass
         
