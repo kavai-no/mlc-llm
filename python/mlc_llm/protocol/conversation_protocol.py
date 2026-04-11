@@ -278,7 +278,10 @@ class Conversation(BaseModel):
         data = self.model_dump(**kwargs)
         if "tool_parser_instance" in data:
             del data["tool_parser_instance"]
-        return json.dumps(data, separators=(',', ':'))
+        # Exclude tool_parser when None for cleaner serialization
+        if "tool_parser" in data and data["tool_parser"] is None:
+            del data["tool_parser"]
+        return json.dumps(data)
     
     def to_json_dict(self) -> dict:
         """Convert to JSON-compatible dict, excluding the hydrated parser instance."""
