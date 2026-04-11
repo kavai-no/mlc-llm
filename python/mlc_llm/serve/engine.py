@@ -1306,6 +1306,7 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                     request_id,
                     self.state,
                     finish_reasons,
+                    self.conv_template,
                 )
 
                 if response is not None:
@@ -1844,6 +1845,7 @@ class MLCEngine(engine_base.MLCEngineBase):
                 request_id,
                 self.state,
                 finish_reasons,
+                self.conv_template,
             )
             if response is not None:
                 yield response

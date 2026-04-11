@@ -298,7 +298,8 @@ async def request_chat_completion(
     logprob_results: Optional[List[List[LogProbsContent]]] = (
         [[] for _ in range(request.n)] if request.logprobs else None
     )
-
+    
+    conversation = async_engine.conv_template.model_copy(deep=True)
     async for response in async_engine._handle_chat_completion(  # pylint: disable=protected-access
         request,
         request_id,
@@ -331,7 +332,7 @@ async def request_chat_completion(
 
     assert all(finish_reason is not None for finish_reason in finish_reasons)
     use_function_calling, tool_calls_list = engine_base.process_function_call_output(
-        output_texts, finish_reasons
+        output_texts, finish_reasons, conversation
     )
 
     return engine_base.wrap_chat_completion_response(

@@ -852,49 +852,41 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
     for i, delta_output in enumerate(delta_outputs):
         finish_reason_updated = False
         if delta_output.finish_reason is not None and finish_reasons[i] is None:
-            finish_reasons[i] = (
-                delta_output.finish_reason if not use_function_calling else "tool_calls"
-            )
+            finish_reasons[i] = delta_output.finish_reason
             finish_reason_updated = True
         if not finish_reason_updated and delta_output.delta_text == "":
-            # Ignore empty delta text when finish reason is not updated.
-            engine_state.record_event(request_id, event="skip empty delta text")
             continue
 
+        if delta_output.delta_logprob_json_strs is not None:
+            logprobs = get_logprobs_from_delta(delta_output.delta_logprob_json_strs)
+        else:
+            logprobs = None
 
-        # Check for tool call content using tool parser
+        # Check for tool calls in streaming response using tool parser
         tool_calls = None
         if use_function_calling and conv_template and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
             try:
                 parse_result = conv_template.tool_parser_instance.parse_streaming(delta_output.delta_text)
                 if parse_result and parse_result.get("type") == "complete_tool_call":
                     tool_calls = parse_result["data"]
-                elif parse_result and parse_result.get("type") == "partial_tool_call":
-                    # Accumulate the text part of partial tool calls into delta_text 
-                    # so the client sees the progress, but don't set tool_calls yet.
-                    delta_output.delta_text += parse_result.get("data", "")
+                    # Once complete, we clear the text to avoid duplicating the XML in content
+                    delta_output.delta_text = ""
+                elif parse_result and (parse_result.get("type") == "partial_tool_call" or parse_result.get("end") == "partial_tool_call"):
+                    # Do NOT append to delta_output.delta_text; that causes duplication in the stream.
+                    # The parser has already processed the existing delta_text. 
+                    # We just let the current chunk's content flow as is.
+                    pass
             except Exception:
                 pass
-        
+
         choices.append(
             openai_api_protocol.ChatCompletionStreamResponseChoice(
                 index=i,
                 finish_reason=finish_reasons[i],
                 delta=openai_api_protocol.ChatCompletionMessage(
-                    content="" if tool_calls else delta_output.delta_text, role="assistant", tool_calls=tool_calls
+                    content=delta_output.delta_text, role="assistant", tool_calls=tool_calls
                 ),
-                logprobs=(
-                    openai_api_protocol.LogProbs(
-                        content=[
-                            openai_api_protocol.LogProbsContent.model_validate_json(
-                                logprob_json_str
-                            )
-                            for logprob_json_str in delta_output.delta_logprob_json_strs
-                        ]
-                    )
-                    if delta_output.delta_logprob_json_strs is not None
-                    else None
-                ),
+                logprobs=logprobs,
             )
         )
 
@@ -1027,13 +1019,7 @@ def get_logprobs_from_delta(
     )
 
 
-def process_completion_stream_output(  # pylint: disable=too-many-arguments
-    delta_outputs: List[CallbackStreamOutput],
-    request: openai_api_protocol.CompletionRequest,
-    request_id: str,
-    engine_state: EngineState,
-    finish_reasons: List[Optional[str]],
-) -> Optional[openai_api_protocol.CompletionResponse]:
+def process_completion_stream_output(delta_outputs, request, request_id, engine_state, finish_reasons, conv_template) -> Optional[openai_api_protocol.CompletionResponse]:
     """Process the delta outputs of a single request of Completion,
     convert the delta output to CompletionResponse and return.
 
@@ -1096,18 +1082,37 @@ def process_completion_stream_output(  # pylint: disable=too-many-arguments
             finish_reasons[i] = delta_output.finish_reason
             finish_reason_updated = True
         if not finish_reason_updated and delta_output.delta_text == "":
-            # Ignore empty delta text when finish reason is not updated.
             continue
 
         if delta_output.delta_logprob_json_strs is not None:
             logprobs = get_logprobs_from_delta(delta_output.delta_logprob_json_strs)
         else:
             logprobs = None
+
+        # Check for tool calls in streaming response using tool parser
+        tool_calls = None
+        if use_function_calling and conv_template and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
+            try:
+                parse_result = conv_template.tool_parser_instance.parse_streaming(delta_output.delta_text)
+                if parse_result and parse_result.get("type") == "complete_tool_call":
+                    tool_calls = parse_result["data"]
+                    # Once complete, we clear the text to avoid duplicating the XML in content
+                    delta_output.delta_text = ""
+                elif parse_result and (parse_result.get("type") == "partial_tool_call" or parse_result.get("end") == "partial_tool_call"):
+                    # Do NOT append to delta_output.delta_text; that causes duplication in the stream.
+                    # The parser has already processed the existing delta_text. 
+                    # We just let the current chunk's content flow as is.
+                    pass
+            except Exception:
+                pass
+
         choices.append(
-            openai_api_protocol.CompletionResponseChoice(
+            openai_api_protocol.ChatCompletionStreamResponseChoice(
                 index=i,
                 finish_reason=finish_reasons[i],
-                text=delta_output.delta_text,
+                delta=openai_api_protocol.ChatCompletionMessage(
+                    content=delta_output.delta_text, role="assistant", tool_calls=tool_calls
+                ),
                 logprobs=logprobs,
             )
         )
@@ -1229,11 +1234,12 @@ def convert_function_str_to_json(
 
 
 def process_function_call_output(
-    output_texts: List[str], finish_reasons: List[str]
+    output_texts: List[str],
+    finish_reasons: List[str],
+    conv_template: Optional[Conversation] = None,
 ) -> Tuple[bool, List[List[openai_api_protocol.ChatToolCall]]]:
     """Process the potential function call results outputted by model,
     according to the finish reasons.
-    Return whether the output has function call, and the list of tool calls.
     """
     n = len(output_texts)
     tool_calls_list: List[List[openai_api_protocol.ChatToolCall]] = [[] for _ in range(n)]
@@ -1269,8 +1275,8 @@ def process_function_call_output(
                     finish_reasons[i] = "error"
                 else:
                     finish_reasons[i] = "tool_calls"
-    return use_function_calling, tool_calls_list
-
+        return use_function_calling, tool_calls_list
+    return False, []
 
 def wrap_chat_completion_response(  # pylint: disable=too-many-arguments
     request_id: str,
