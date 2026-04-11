@@ -790,6 +790,7 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
     engine_state: EngineState,
     use_function_calling: bool,
     finish_reasons: List[Optional[str]],
+    conv_template: Optional[Conversation] = None,
 ) -> Optional[openai_api_protocol.ChatCompletionStreamResponse]:
     """Process the delta outputs of a single request of ChatCompletion,
     convert the delta output to ChatCompletionStreamResponse and return.
@@ -860,12 +861,23 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
             engine_state.record_event(request_id, event="skip empty delta text")
             continue
 
+
+        # Check for tool call content using tool parser
+        tool_calls = None
+        if use_function_calling and conv_template and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
+            try:
+                parse_result = conv_template.tool_parser_instance.parse_streaming(delta_output.delta_text)
+                if parse_result and parse_result.get("type") == "complete_tool_call":
+                    tool_calls = parse_result["data"]
+            except Exception:
+                pass
+        
         choices.append(
             openai_api_protocol.ChatCompletionStreamResponseChoice(
                 index=i,
                 finish_reason=finish_reasons[i],
                 delta=openai_api_protocol.ChatCompletionMessage(
-                    content=delta_output.delta_text, role="assistant"
+                    content="" if tool_calls else delta_output.delta_text, role="assistant", tool_calls=tool_calls
                 ),
                 logprobs=(
                     openai_api_protocol.LogProbs(
@@ -1155,11 +1167,42 @@ def create_completion_suffix_response(
     )
     return response
 
-
-def convert_function_str_to_json(stringified_calls: str) -> List[Union[Dict, None]]:
+def convert_function_str_to_json(
+    stringified_calls: str, conv_template: Optional[Conversation] = None
+) -> List[Union[Dict, None]]:
     """Convert a (possibly list) of function call string to a list of json objects.
-    Return None for invalid function call string."""
-
+    Return None for invalid function call string.
+    
+    If conv_template has a tool parser, use it for XML-format output (e.g., Qwen3.5).
+    Otherwise, fall back to JSON/AST parsing for backward compatibility.
+    """
+    # Try using tool parser if available
+    if conv_template is not None and hasattr(conv_template, 'tool_parser_instance'):
+        try:
+            # Hydrate the tool parser instance if needed
+            if conv_template.tool_parser_instance is None and conv_template.tool_parser:
+                from mlc_llm.serve.tool_parser import get_parser_instance
+                conv_template.tool_parser_instance = get_parser_instance(conv_template.tool_parser)
+            
+            # Use the tool parser to extract tool calls
+            if conv_template.tool_parser_instance is not None:
+                content, tool_calls = conv_template.tool_parser_instance.parse(stringified_calls)
+                
+                # Convert ChatToolCall objects to JSON format expected by downstream code
+                result = []
+                for tc in tool_calls:
+                    if hasattr(tc, 'function') and tc.function is not None:
+                        result.append({
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments if hasattr(tc.function, 'arguments') else {}
+                        })
+                
+                return result
+        except Exception:
+            # Fall back to original parsing if tool parser fails
+            pass
+    
+    # Original JSON/AST parsing for backward compatibility
     def parse_function_call(call_str: str):
         node = ast.parse(call_str, mode="eval")
         call_node = node.body
@@ -1194,21 +1237,29 @@ def process_function_call_output(
     if use_function_calling:
         for i, output_text in enumerate(output_texts):
             try:
-                fn_json_list = convert_function_str_to_json(output_text)
+                # Use tool parser if available
+                if conv_template is not None and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
+                    content, tool_calls = conv_template.tool_parser_instance.parse(output_text)
+                    if tool_calls:
+                        tool_calls_list[i] = tool_calls
+                    else:
+                        tool_calls_list[i] = []
+                else:
+                    # Fall back to original JSON parsing
+                    fn_json_list = convert_function_str_to_json(output_text)
+                    tool_calls_list[i] = [
+                        openai_api_protocol.ChatToolCall(
+                            type="function",
+                            function=openai_api_protocol.ChatFunctionCall(
+                                name=fn_json_obj["name"], arguments=fn_json_obj["arguments"]
+                            ),
+                        )
+                        for fn_json_obj in fn_json_list
+                        if fn_json_obj is not None
+                    ]
             except (SyntaxError, ValueError):
                 output_text = "Got an invalid function call output from model"
                 finish_reasons[i] = "error"
-            else:
-                tool_calls_list[i] = [
-                    openai_api_protocol.ChatToolCall(
-                        type="function",
-                        function=openai_api_protocol.ChatFunctionCall(
-                            name=fn_json_obj["name"], arguments=fn_json_obj["arguments"]
-                        ),
-                    )
-                    for fn_json_obj in fn_json_list
-                    if fn_json_obj is not None
-                ]
                 if len(tool_calls_list[i]) == 0:
                     output_texts[i] = "Got an invalid function call output from model"
                     finish_reasons[i] = "error"
