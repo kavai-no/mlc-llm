@@ -1,9 +1,9 @@
 import pytest
-from mlc_llm.conversation_template.qwen3_5 import Qwen3_5_Template
+from mlc_llm.conversation_template import ConvTemplateRegistry
 
 def test_qwen3_tool_rendering():
     """Test that the Qwen3 template can render actual tool lists."""
-    template = Qwen3_5_Template(system_message="You are a helpful assistant")
+    template = ConvTemplateRegistry.get_conv_template("qwen3_5")
     
     # Add a message with tools
     template.messages = [

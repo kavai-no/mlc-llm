@@ -304,3 +304,130 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         
         # Otherwise still partial (missing closing tags)
         return {"type": "partial_tool_call", "data": self._streaming_buffer}
+    
+    def render_tool_call_result(self, content: str) -> str:
+        # Follow the official Qwen3-Coder chat template format
+        return f"<tool_response>\n{content}\n</tool_response>\n"
+    
+    def render_tool_call(self, tool_call_item: Dict[str, Any]) -> str:
+        """
+        Render a tool call item to XML format for Qwen3.
+        
+        Parameters
+        ----------
+        tool_call_item : Dict[str, Any]
+            Tool call item with structure: {"type": "tool_call", "name": str, "parameters": dict}
+            
+        Returns
+        -------
+        str
+            XML-formatted tool call string
+        """
+        tool_name = tool_call_item.get("name", "unknown")
+        parameters = tool_call_item.get("parameters", {})
+        
+        # Build parameter tags with proper newlines
+        param_tags = []
+        for param_name, param_value in parameters.items():
+            param_tags.append(f"<parameter={param_name}>\n{param_value}\n</parameter>")
+        
+        if not param_tags:
+            return f"<tool_call>\n<function={tool_name}></function>\n</tool_call>"
+        
+        # Build complete tool call XML with proper structure
+        params_xml = "\n".join(param_tags)
+        return f"<tool_call>\n<function={tool_name}>\n{params_xml}\n</function>\n</tool_call>"
+    
+    def render_tools(self, tools: List[Dict[str, Any]]) -> str:
+        """
+        Render a list of tools to XML format for Qwen3 system prompt.
+        
+        This follows the Qwen3-Coder format shown in the official chat template.
+        
+        Parameters
+        ----------
+        tools : List[Dict[str, Any]]
+            List of tool definitions with structure matching OpenAI API format:
+            {"type": "function", "function": {"name": str, "description": str, "parameters": {...}}}
+            
+        Returns
+        -------
+        str
+            XML-formatted tools list for system prompt
+        """
+        if not tools:
+            return ""
+        
+        tool_xmls = []
+        for tool in tools:
+            # Extract function definition from tool
+            if isinstance(tool, dict):
+                func_def = tool.get("function", {})
+                if not func_def:
+                    continue
+                
+                name = func_def.get("name", "unknown_function")
+                description = func_def.get("description", "")
+                parameters = func_def.get("parameters", {})
+                
+                # Build function XML
+                func_xml_parts = ["<function>", f"<name>{name}</name>"]
+                
+                if description:
+                    func_xml_parts.append(f"<description>{description}</description>")
+                
+                # Add parameters if present
+                if isinstance(parameters, dict) and "properties" in parameters:
+                    props = parameters["properties"]
+                    if isinstance(props, dict):
+                        func_xml_parts.append("<parameters>")
+                        for param_name, param_def in props.items():
+                            param_type = param_def.get("type", "string")
+                            param_desc = param_def.get("description", "")
+                            
+                            param_xml = f"<parameter>\n<name>{param_name}</name>\n<type>{param_type}</type>"
+                            if param_desc:
+                                param_xml += f"\n<description>{param_desc}</description>\n"
+                            param_xml += "</parameter>"
+                            
+                            func_xml_parts.append(param_xml)
+                        func_xml_parts.append("</parameters>")
+                
+                func_xml_parts.append("</function>")
+                tool_xmls.append("\n".join(func_xml_parts))
+        
+        if not tool_xmls:
+            return ""
+        
+        # Build complete tools section with instructional text
+        tools_section = []
+        tools_section.append("<tools>")
+        tools_section.extend(tool_xmls)
+        tools_section.append("</tools>")
+        
+        # Add instructional text about tool call format (from official template)
+        tools_section.append("""
+If you choose to call a function ONLY reply in the following format with NO suffix:
+
+<tool_call>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+<parameter=example_parameter_2>
+This is the value for the second parameter
+that can span
+multiple lines
+</parameter>
+</function>
+</tool_call>
+
+<IMPORTANT>
+Reminder:
+- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags
+- Required parameters MUST be specified
+- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after
+- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls
+</IMPORTANT>""")
+        
+        return "\n".join(tools_section)

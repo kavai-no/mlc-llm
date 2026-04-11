@@ -15,6 +15,7 @@ class MessagePlaceholders(Enum):
     TOOL = "{tool_message}"
     FUNCTION = "{function_string}"
 
+
 class BaseToolParser(ABC):
     """Abstract base class for tool parsers."""
     @abstractmethod
@@ -93,7 +94,7 @@ class Conversation(BaseModel):
     # The parser name to use for tool calls (must be registered in PARSER_REGISTRY).
     tool_parser: Optional[str] = None
     # The hydrated parser instance used during runtime.
-    tool_parser_instance: Optional[Any] = None
+    tool_parser_instance: Optional[BaseToolParser] = None
     # Whether to use function calling
     use_function_calling: Optional[bool] = None
 
@@ -145,6 +146,8 @@ class Conversation(BaseModel):
         system_msg = self.system_template.replace(
             MessagePlaceholders.SYSTEM.value, self.system_message
         )
+        
+
 
         # - Get the message strings.
         message_list: List[Union[str, data.Data]] = []
@@ -198,33 +201,35 @@ class Conversation(BaseModel):
                     message_list.append("\n")
                 elif item["type"] == "tool_call":
                     # Render tool call using the function_string template
-                    if self.function_string:
-                        # Build the tool call XML from the tool_call data
+                    if hasattr(self, 'tool_parser_instance') and self.tool_parser_instance:
+                        # Use tool parser to render tool calls in the appropriate format
+                        rendered = self.tool_parser_instance.render_tool_call(item)
+                        message_list.append(rendered)
+                    elif self.function_string:
+                        # Fallback: Build simple tool call from the tool_call data
                         tool_name = item.get("name", "unknown")
                         parameters = item.get("parameters", {})
                         
-                        # Convert parameters to individual <parameter> tags
-                        param_xmls = []
+                        # Convert parameters to individual tags
+                        param_tags = []
                         for param_name, param_value in parameters.items():
-                            param_xmls.append(
-                                self.function_string.replace(
-                                    "{function_name}", tool_name
-                                ).replace(
-                                    "{param_name}", str(param_name)
-                                ).replace(
-                                    "{param_value}", str(param_value)
-                                )
-                            )
+                            param_tags.append(f"{param_name}={param_value}")
                         
-                        # Join all parameter XMLs for this tool call
-                        if param_xmls:
-                            message_list.append("\n".join(param_xmls))
+                        if param_tags:
+                            params_str = " ".join(param_tags)
+                            message_list.append(self.function_string.replace("{function_name}", tool_name).replace("{param_name}", "").replace("{param_value}", params_str))
+                        else:
+                            message_list.append(self.function_string.replace("{function_name}", tool_name))
                     else:
-                        raise ValueError("function_string must be defined to render tool calls")
+                        raise ValueError("function_string must be defined to render tool calls or tool_parser_instance must be available")
                 elif item["type"] == "tool_result":
-                    # Render tool result in XML format
+                    # Render tool result using tool parser if available
                     content = item.get("content", "")
-                    message_list.append(f"<tool_response>{content}</tool_response>")
+                    if hasattr(self, 'tool_parser_instance') and self.tool_parser_instance:
+                        rendered = self.tool_parser_instance.render_tool_call_result(content)
+                        message_list.append(rendered)
+                    else:
+                        message_list.append(content)
                 else:
                     raise ValueError(f"Unsupported content type: {item['type']}")
 
