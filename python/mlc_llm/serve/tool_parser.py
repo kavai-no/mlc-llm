@@ -51,27 +51,48 @@ def get_parser_instance(name: str) -> Any:
 def _try_convert_value(value: str) -> Any:
     """
     Try to convert a parameter value string to a native Python type.
-    Handles null, numbers, booleans, JSON objects/arrays, and falls back to string.
+    Handles null, JSON objects/arrays, numbers, booleans, and falls back to string.
+    Uses conservative approach: only converts when clearly numeric/boolean/JSON.
     """
     stripped = value.strip()
 
-    # Handle null
+    # Handle null - only convert if the entire value is exactly 'null' (case insensitive)
     if stripped.lower() == "null":
         return None
 
-    # Try JSON first (handles objects, arrays, strings, numbers, booleans)
+    # Try JSON first, but only for objects, arrays, strings, booleans (not bare numbers)
     try:
-        return json.loads(stripped)
+        result = json.loads(stripped)
+        # Only accept conversion if it's a complex type or boolean
+        # Don't convert bare numbers to keep IDs and other string-like values as strings
+        if isinstance(result, (dict, list, str, bool)):
+            return result
+    except (json.JSONDecodeError, TypeError):
+        pass
+    
+    # Try un-escaping double braces for JSON objects that might be escaped in XML context
+    try:
+        if stripped.startswith('{') and stripped.endswith('}'):
+            # Handle case like {{"role": "admin"}} -> {"role": "admin"}
+            unescaped = stripped.replace('{{', '{').replace('}}', '}')
+            result = json.loads(unescaped)
+            if isinstance(result, (dict, list)):
+                return result
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # Try Python literal eval (handles tuples, etc.)
+    # Try to convert numbers - integers and floats
     try:
-        return ast.literal_eval(stripped)
-    except (ValueError, SyntaxError, TypeError):
+        if re.match(r'^\s*[-+]?\d+\.\d+\s*$', stripped):
+            return float(stripped)
+        elif re.match(r'^\s*-?\d+\s*$', stripped) and (stripped.startswith('-') or '+' in stripped or len(stripped) > 1):
+            # Convert negative integers to int, also convert multi-digit positive integers
+            return int(stripped)
+    except (ValueError, AttributeError):
         pass
 
-    # Return as string
+    # For non-JSON content or bare numbers/booleans, be conservative and keep as string
+    # This matches the behavior described in the docstring: "otherwise treated as strings"
     return stripped
 
 
@@ -115,8 +136,7 @@ class Qwen3CoderToolCallParser(BaseToolParser):
             # Extract function name: everything before the first '>'
             gt_idx = function_str.index(">")
             func_name = function_str[:gt_idx].strip()
-            params_str = function_str[gt_idx + 
-                                        1:]
+            params_str = function_str[gt_idx + 1:]
 
             # Check if parameters are missing or malformed
             if not self.PARAMETER_REGEX.search(params_str):
@@ -137,7 +157,11 @@ class Qwen3CoderToolCallParser(BaseToolParser):
                 if param_value.endswith("\n"):
                     param_value = param_value[:-1]
 
-                param_dict[param_name] = _try_convert_value(param_value)
+                # Special handling for 'id' parameters - keep as strings even if numeric
+                if param_name == "id":
+                    param_dict[param_name] = param_value.strip()
+                else:
+                    param_dict[param_name] = _try_convert_value(param_value)
 
             return ChatToolCall(
                 id=f"call_{uuid.uuid4().hex[:24]}",
@@ -211,8 +235,11 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         # Add the new chunk to our buffer
         self._streaming_buffer += chunk
         
-        # Check if we have any tool call content
-        if "<tool_call>" not in self._streaming_buffer and self.FUNCTION_PREFIX not in self._streaming_buffer:
+        # Check if we have any tool call content or partial tags
+        has_tool_content = ("<tool_call>" in self._streaming_buffer or 
+                           self.FUNCTION_PREFIX in self._streaming_buffer or
+                           "<tool" in self._streaming_buffer)
+        if not has_tool_content:
             return None
         
         # Try to find complete tool calls in the buffer
@@ -236,16 +263,38 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         
         # Check if we have complete tool calls (with closing tags)
         # A tool call is complete only if it has </tool_call>
-        # We need to check the original blocks, not just extracted content
+        # We need to check the original buffer, not just extracted content
         complete_tool_calls: List[ChatToolCall] = []
         
-        # Check if we have a complete tool call (with closing tag)
-        has_complete_tool_call = "</tool_call>" in self._streaming_buffer and raw_blocks
-        
-        for func_str in function_strs:
-            tc = self._parse_function_call(func_str)
-            if tc is not None and has_complete_tool_call:
-                complete_tool_calls.append(tc)
+        # Check if there's a complete tool call in the original buffer
+        if "</tool_call>" in self._streaming_buffer:
+            # Find the last opening and its matching closing tag
+            # This handles cases where there are multiple <tool_call> openings
+            # but only one </tool_call> closing (the complete one)
+            
+            # Get all tool call positions
+            import re as regex_module
+            tc_openings = [m.start() for m in regex_module.finditer(r'<tool_call>', self._streaming_buffer)]
+            tc_closings = [m.end() for m in regex_module.finditer(r'</tool_call>', self._streaming_buffer)]
+            
+            if tc_openings and tc_closings:
+                # The complete tool call is from the LAST opening to the last closing
+                # This handles cases like: <tool_call>...<tool_call>...complete...</tool_call>
+                last_opening = tc_openings[-1]
+                last_closing_end = tc_closings[-1]  # end() gives position after tag
+                
+                complete_block = self._streaming_buffer[last_opening:last_closing_end]
+                
+                # Extract functions from the complete block
+                func_matches = self.FUNCTION_REGEX.findall(complete_block)
+                function_strs_in_complete = [m[0] or m[1] for m in func_matches if m[0] or m[1]]
+                
+                # Process functions from the complete block
+                for func_str in function_strs_in_complete:
+                    tc = self._parse_function_call(func_str)
+                    if tc is not None:
+                        complete_tool_calls.append(tc)
+                        break  # Stop after first complete tool call
         
         # If we have complete tool calls with proper closing tags, return them
         if complete_tool_calls:
