@@ -875,9 +875,6 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
                     # During partial parsing, we don't want to emit the raw XML tags as content.
                     # The parser will eventually return a 'complete_tool_call'.
                     delta_output.delta_text = ""
-                elif parse_result and parse_result.get("type") == "complete_tool_call":
-                    # We've just finished a tool call, ensure we don't emit it as content either.
-                    delta_output.delta_text = ""
             except Exception:
                 pass
 
@@ -1104,9 +1101,6 @@ def process_completion_stream_output(delta_outputs, request, request_id, engine_
                     # During partial parsing, we don't want to emit the raw XML tags as content.
                     # The parser will eventually return a 'complete_tool_call'.
                     delta_output.delta_text = ""
-                elif parse_result and parse_result.get("type") == "complete_tool_call":
-                    # We've just finished a tool call, ensure we don't emit it as content either.
-                    delta_output.delta_text = ""
             except Exception:
                 pass
 
@@ -1254,8 +1248,12 @@ def process_function_call_output(  # pylint: disable=too-many-arguments
                 # Use tool parser if available (handles XML format like Qwen3)
                 if conv_template is not None and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
                     content, tool_calls = conv_template.tool_parser_instance.parse(output_text)
+                    # If we found tool calls, we must update the text to strip XML tags 
+                    # so that content doesn't leak into the response if it's not a tool call finish reason
+                    output_texts[i] = content
                     if tool_calls:
                         tool_calls_list[i] = tool_calls
+                        use_function_calling = True
                     else:
                         tool_calls_list[i] = []
                 else:
@@ -1271,16 +1269,19 @@ def process_function_call_output(  # pylint: disable=too-many-arguments
                         for fn_json_obj in fn_json_list
                         if fn_json_obj is not None
                     ]
+                    if tool_calls_list[i]:
+                        use_function_calling = True
             except Exception:
                 output_text = "Got an invalid function call output from model"
                 finish_reasons[i] = "error"
                 if len(tool_calls_list[i]) == 0:
-                    output_texts[i] = "Got an invalid function_call output from model"
+                    output_texts[i] = "Got an invalid function call output from model"
                     finish_reasons[i] = "error"
                 else:
                     finish_reasons[i] = "tool_calls"
         return use_function_calling, tool_calls_list
     return False, []
+
 
 def wrap_chat_completion_response(  # pylint: disable=too-many-arguments
     request_id: str,
