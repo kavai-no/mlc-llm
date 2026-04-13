@@ -1241,46 +1241,51 @@ def process_function_call_output(  # pylint: disable=too-many-arguments
     """
     n = len(output_texts)
     tool_calls_list: List[List[openai_api_protocol.ChatToolCall]] = [[] for _ in range(n)]
-    use_function_calling = any(finish_reason == "tool_calls" for finish_reason in finish_reasons)
-    if use_function_calling or (conv_template is not None and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance):
+    n = len(output_texts)
+    tool_calls_list: List[List[openai_api_protocol.ChatToolCall]] = [[] for _ in range(n)]
+    use_function_calling = False
+
+    # Always attempt to parse if a tool parser is present, 
+    # regardless of the finish_reason.
+    if conv_template is not None and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
         for i, output_text in enumerate(output_texts):
             try:
-                # Use tool parser if available (handles XML format like Qwen3)
-                if conv_template is not None and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
-                    content, tool_calls = conv_template.tool_parser_instance.parse(output_text)
-                    # If we found tool calls, we must update the text to strip XML tags 
-                    # so that content doesn't leak into the response if it's not a tool call finish reason
-                    output_texts[i] = content
-                    if tool_calls:
-                        tool_calls_list[i] = tool_calls
-                        use_function_calling = True
-                    else:
-                        tool_calls_list[i] = []
+                content, tool_calls = conv_template.tool_parser_instance.parse(output_text)
+                output_texts[i] = content
+                if tool_calls:
+                    tool_calls_list[i] = tool_calls
+                    use_function_calling = True
                 else:
-                    # Fall back to original JSON/AST parsing for backward compatibility
-                    fn_json_list = convert_function_str_to_json(output_text)
-                    tool_calls_list[i] = [
-                        openai_api_protocol.ChatToolCall(
-                            type="function",
-                            function=openai_api_protocol.ChatFunctionCall(
-                                name=fn_json_obj["name"], arguments=fn_json_obj["arguments"]
-                            ),
-                        )
-                        for fn_json_obj in fn_json_list
-                        if fn_json_obj is not None
-                    ]
-                    if tool_calls_list[i]:
-                        use_function_calling = True
+                    tool_calls_list[i] = []
             except Exception:
-                output_text = "Got an invalid function call output from model"
+                output_texts[i] = "Got an invalid function call output from model"
                 finish_reasons[i] = "error"
-                if len(tool_calls_list[i]) == 0:
-                    output_texts[i] = "Got an invalid function call output from model"
-                    finish_reasons[i] = "error"
-                else:
-                    finish_reasons[i] = "tool_calls"
-        return use_function_calling, tool_calls_list
-    return False, []
+
+    # Fallback to JSON parsing only if the parser didn't find anything or isn't present
+    if not use_function_calling:
+        for i, output_text in enumerate(output_texts):
+            try:
+                fn_json_list = convert_function_str_to_json(output_text)
+                tool_calls_list[i] = [
+                    openai_api_protocol.ChatToolCall(
+                        type="function",
+                        function=openai_api_protocol.ChatFunctionCall(
+                            name=fn_json_obj["name"], arguments=fn_json_obj["arguments"]
+                        ),
+                    )
+                    for fn_json_obj in fn_json_list
+                    if fn_json_obj is not None
+                ]
+                if tool_calls_list[i]:
+                    use_function_calling = True
+            except Exception:
+                pass
+
+    # Finally, update the use_function_calling flag based on actual findings or explicit finish_reasons
+    if any(fr == "tool_calls" for fr in finish_reasons):
+        use_function_calling = True
+
+    return use_function_calling, tool_calls_list
 
 
 def wrap_chat_completion_response(  # pylint: disable=too-many-arguments
