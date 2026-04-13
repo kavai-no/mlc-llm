@@ -864,7 +864,7 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
 
         # Check for tool calls in streaming response using tool parser
         tool_calls = None
-        if use_function_calling and conv_template and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
+        if conv_template and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
             try:
                 parse_result = conv_template.tool_parser_instance.parse_streaming(delta_output.delta_text)
                 if parse_result and parse_result.get("type") == "complete_tool_call":
@@ -1093,7 +1093,7 @@ def process_completion_stream_output(delta_outputs, request, request_id, engine_
 
         # Check for tool calls in streaming response using tool parser
         tool_calls = None
-        if use_function_calling and conv_template and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
+        if conv_template and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
             try:
                 parse_result = conv_template.tool_parser_instance.parse_streaming(delta_output.delta_text)
                 if parse_result and parse_result.get("type") == "complete_tool_call":
@@ -1275,7 +1275,7 @@ def process_function_call_output(  # pylint: disable=too-many-arguments
                 output_text = "Got an invalid function call output from model"
                 finish_reasons[i] = "error"
                 if len(tool_calls_list[i]) == 0:
-                    output_texts[i] = "Got an invalid function call output from model"
+                    output_texts[i] = "Got an invalid function_call output from model"
                     finish_reasons[i] = "error"
                 else:
                     finish_reasons[i] = "tool_calls"
