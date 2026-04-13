@@ -872,10 +872,12 @@ def process_chat_completion_stream_output(  # pylint: disable=too-many-arguments
                     # Once complete, we clear the text to avoid duplicating the XML in content
                     delta_output.delta_text = ""
                 elif parse_result and (parse_result.get("type") == "partial_tool_call" or parse_result.get("end") == "partial_tool_call"):
-                    # Do NOT append to delta_output.delta_text; that causes duplication in the stream.
-                    # The parser has already processed the existing delta_text. 
-                    # We just let the current chunk's content flow as is.
-                    pass
+                    # During partial parsing, we don't want to emit the raw XML tags as content.
+                    # The parser will eventually return a 'complete_tool_call'.
+                    delta_output.delta_text = ""
+                elif parse_result and parse_result.get("type") == "complete_tool_call":
+                    # We've just finished a tool call, ensure we don't emit it as content either.
+                    delta_output.delta_text = ""
             except Exception:
                 pass
 
@@ -1099,10 +1101,12 @@ def process_completion_stream_output(delta_outputs, request, request_id, engine_
                     # Once complete, we clear the text to avoid duplicating the XML in content
                     delta_output.delta_text = ""
                 elif parse_result and (parse_result.get("type") == "partial_tool_call" or parse_result.get("end") == "partial_tool_call"):
-                    # Do NOT append to delta_output.delta_text; that causes duplication in the stream.
-                    # The parser has already processed the existing delta_text. 
-                    # We just let the current chunk's content flow as is.
-                    pass
+                    # During partial parsing, we don't want to emit the raw XML tags as content.
+                    # The parser will eventually return a 'complete_tool_call'.
+                    delta_output.delta_text = ""
+                elif parse_result and parse_result.get("type") == "complete_tool_call":
+                    # We've just finished a tool call, ensure we don't emit it as content either.
+                    delta_output.delta_text = ""
             except Exception:
                 pass
 
@@ -1233,7 +1237,7 @@ def convert_function_str_to_json(
     return function_calls_json
 
 
-def process_function_call_output(
+def process_function_call_output(  # pylint: disable=too-many-arguments
     output_texts: List[str],
     finish_reasons: List[str],
     conv_template: Optional[Conversation] = None,
@@ -1244,10 +1248,10 @@ def process_function_call_output(
     n = len(output_texts)
     tool_calls_list: List[List[openai_api_protocol.ChatToolCall]] = [[] for _ in range(n)]
     use_function_calling = any(finish_reason == "tool_calls" for finish_reason in finish_reasons)
-    if use_function_calling:
+    if use_function_calling or (conv_template is not None and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance):
         for i, output_text in enumerate(output_texts):
             try:
-                # Use tool parser if available
+                # Use tool parser if available (handles XML format like Qwen3)
                 if conv_template is not None and hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
                     content, tool_calls = conv_template.tool_parser_instance.parse(output_text)
                     if tool_calls:
@@ -1255,7 +1259,7 @@ def process_function_call_output(
                     else:
                         tool_calls_list[i] = []
                 else:
-                    # Fall back to original JSON parsing
+                    # Fall back to original JSON/AST parsing for backward compatibility
                     fn_json_list = convert_function_str_to_json(output_text)
                     tool_calls_list[i] = [
                         openai_api_protocol.ChatToolCall(
@@ -1267,7 +1271,7 @@ def process_function_call_output(
                         for fn_json_obj in fn_json_list
                         if fn_json_obj is not None
                     ]
-            except (SyntaxError, ValueError):
+            except Exception:
                 output_text = "Got an invalid function call output from model"
                 finish_reasons[i] = "error"
                 if len(tool_calls_list[i]) == 0:

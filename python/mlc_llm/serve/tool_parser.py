@@ -149,17 +149,17 @@ class Qwen3CoderToolCallParser(BaseToolParser):
                     continue
                 eq_idx = match_text.index(">")
                 param_name = match_text[:eq_idx].strip()
+                # Handle the closing tag if it's present in the capture group
                 param_value = match_text[eq_idx + 1:]
+                if "</parameter>" in param_value:
+                    param_value = param_value.split("</parameter>")[0]
 
                 # Clean up whitespace
-                if param_value.startswith("\n"):
-                    param_value = param_value[1:]
-                if param_value.endswith("\n"):
-                    param_value = param_value[:-1]
+                param_value = param_value.strip()
 
                 # Special handling for 'id' parameters - keep as strings even if numeric
                 if param_name == "id":
-                    param_dict[param_name] = param_value.strip()
+                    param_dict[param_name] = param_value
                 else:
                     param_dict[param_name] = _try_convert_value(param_value)
 

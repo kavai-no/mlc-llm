@@ -24,6 +24,7 @@ from mlc_llm.protocol.openai_api_protocol import (
 )
 from mlc_llm.serve import engine_base, engine_utils
 from mlc_llm.serve.server import ServerContext
+from mlc_llm.serve.tool_parser import get_parser_instance
 
 
 def verify_api_key(request: fastapi.Request):
