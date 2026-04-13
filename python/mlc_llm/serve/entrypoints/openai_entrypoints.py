@@ -177,6 +177,15 @@ async def request_completion(request: CompletionRequest, raw_request: fastapi.Re
                 return
             yield f"data: {first_response.model_dump_json(by_alias=True)}\n\n"
             async for response in stream_generator:
+                if response.choices:
+                    choice = response.choices[0]
+                    # Hook into existing engine logic to intercept tool calls in the stream
+                    use_tf, tool_calls_list = engine_base.process_function_call_output(
+                        [choice.delta.content or ""], [choice.finish_reason], async_engine.conv_template
+                    )
+                    if use_tf and tool_calls_list[0]:
+                        choice.delta.tool_calls = tool_calls_list[0]
+                        choice.delta.content = ""  # Prevent XML leakage
                 yield f"data: {response.model_dump_json(by_alias=True)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -285,6 +294,15 @@ async def request_chat_completion(
                 return
             yield f"data: {first_response.model_dump_json(by_alias=True)}\n\n"
             async for response in stream_generator:
+                if response.choices:
+                    choice = response.choices[0]
+                    # Hook into existing engine logic to intercept tool calls in the stream
+                    use_tf, tool_calls_list = engine_base.process_function_call_output(
+                        [choice.delta.content or ""], [choice.finish_reason], async_engine.conv_template
+                    )
+                    if use_tf and tool_calls_list[0]:
+                        choice.delta.tool_calls = tool_calls_list[0]
+                        choice.delta.content = ""  # Prevent XML leakage
                 yield f"data: {response.model_dump_json(by_alias=True)}\n\n"
             yield "data: [DONE]\n\n"
 
