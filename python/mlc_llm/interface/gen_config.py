@@ -113,8 +113,7 @@ def gen_config(  # pylint: disable=too-many-locals,too-many-arguments,too-many-b
         )
         conversation = conv_template  # type: ignore
     else:
-        # Use the conversation template directly without serialization
-        conversation = conversation_reg  # type: ignore
+        conversation = conversation_reg.to_json_dict()  # type: ignore
 
     model_config = ModelConfigOverride(
         context_window_size=context_window_size,

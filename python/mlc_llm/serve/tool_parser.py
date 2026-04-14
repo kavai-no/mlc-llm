@@ -241,11 +241,11 @@ class Qwen3CoderToolCallParser(BaseToolParser):
                            "<tool" in self._streaming_buffer)
         if not has_tool_content:
             return None
-        
+
         # Try to find complete tool calls in the buffer
         tc_matches = self.TOOL_CALL_REGEX.findall(self._streaming_buffer)
         raw_blocks = [m[0] or m[1] for m in tc_matches if m[0] or m[1]]
-        
+
         if not raw_blocks:
             # No complete tool calls yet, return partial
             return {"type": "partial_tool_call", "data": self._streaming_buffer}

@@ -83,22 +83,3 @@ ConvTemplateRegistry.register_conv_template(
         system_prefix_token_ids=[1],
     )
 )
-
-# Qwen3.5 XML-style tool calling
-# Note: qwen3_5 template is registered in qwen3_5.py, not here
-# ConvTemplateRegistry.register_conv_template(
-#     Conversation(
-#         name="qwen3_5",
-#         system_template=f"<|im_start|>system\n{MessagePlaceholders.SYSTEM.value}<|im_end|>\n",
-#         system_message=(
-#             "You are a helpful assistant."
-#         ),
-#         roles={"user": "<|im_start|>user", "assistant": "<|im_start|>assistant"},
-#         seps=["<|im_end|>\n"],
-#         role_content_sep="\n",
-#         role_empty_sep="\n",
-#         stop_str=["<|im_end|>"],
-#         stop_token_ids=[2],
-#         tool_parser="qwen3_coder",
-#     )
-# )

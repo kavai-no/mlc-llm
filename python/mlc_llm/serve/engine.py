@@ -1207,7 +1207,6 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         e : BadRequestError
             BadRequestError is raised when the request is invalid.
         """
-        conv_template = self.conv_template.model_copy(deep=True)
         (
             prompts,
             generation_cfg,
@@ -1220,7 +1219,7 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
             self.model_config_dicts[0],
             self.tokenizer.encode,
             self.max_input_sequence_length,
-            conv_template
+            self.conv_template.model_copy(deep=True),
         )
         # prompt length is not used
         _ = prompt_length
@@ -1239,7 +1238,6 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                     self.state,
                     use_function_calling,
                     finish_reasons,
-                    conv_template,
                 )
 
                 if response is not None:
@@ -1306,7 +1304,6 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                     request_id,
                     self.state,
                     finish_reasons,
-                    self.conv_template,
                 )
 
                 if response is not None:
@@ -1845,7 +1842,6 @@ class MLCEngine(engine_base.MLCEngineBase):
                 request_id,
                 self.state,
                 finish_reasons,
-                self.conv_template,
             )
             if response is not None:
                 yield response

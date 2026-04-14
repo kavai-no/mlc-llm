@@ -24,7 +24,6 @@ from mlc_llm.protocol.openai_api_protocol import (
 )
 from mlc_llm.serve import engine_base, engine_utils
 from mlc_llm.serve.server import ServerContext
-from mlc_llm.serve.tool_parser import get_parser_instance
 
 
 def verify_api_key(request: fastapi.Request):
@@ -177,15 +176,6 @@ async def request_completion(request: CompletionRequest, raw_request: fastapi.Re
                 return
             yield f"data: {first_response.model_dump_json(by_alias=True)}\n\n"
             async for response in stream_generator:
-                if response.choices:
-                    choice = response.choices[0]
-                    # Hook into existing engine logic to intercept tool calls in the stream
-                    use_tf, tool_calls_list = engine_base.process_function_call_output(
-                        [choice.delta.content or ""], [choice.finish_reason], async_engine.conv_template
-                    )
-                    if use_tf and tool_calls_list[0]:
-                        choice.delta.tool_calls = tool_calls_list[0]
-                        choice.delta.content = ""  # Prevent XML leakage
                 yield f"data: {response.model_dump_json(by_alias=True)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -289,6 +279,7 @@ async def request_chat_completion(
         )
 
         async def completion_stream_generator() -> AsyncGenerator[str, None]:
+            parser = async_engine.conv_template.tool_parser_instance
             if isinstance(first_response, StopAsyncIteration):
                 yield "data: [DONE]\n\n"
                 return
@@ -296,13 +287,18 @@ async def request_chat_completion(
             async for response in stream_generator:
                 if response.choices:
                     choice = response.choices[0]
-                    # Hook into existing engine logic to intercept tool calls in the stream
-                    use_tf, tool_calls_list = engine_base.process_function_call_output(
-                        [choice.delta.content or ""], [choice.finish_reason], async_engine.conv_template
-                    )
-                    if use_tf and tool_calls_list[0]:
-                        choice.delta.tool_calls = tool_calls_list[0]
-                        choice.delta.content = ""  # Prevent XML leakage
+                    content = choice.delta.content or ""
+                    if parser:
+                        try:
+                            parse_res = parser.parse_streaming(content)
+                            if parse_res:
+                                if parse_res["type"] == "complete_tool_call":
+                                    choice.delta.tool_calls = parse_res["data"]
+                                    choice.delta.content = ""
+                                elif parse_res["type"] == "partial_tool_call":
+                                    choice.delta.content = ""
+                        except Exception:
+                            pass
                 yield f"data: {response.model_dump_json(by_alias=True)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -317,8 +313,7 @@ async def request_chat_completion(
     logprob_results: Optional[List[List[LogProbsContent]]] = (
         [[] for _ in range(request.n)] if request.logprobs else None
     )
-    
-    conversation = async_engine.conv_template.model_copy(deep=True)
+
     async for response in async_engine._handle_chat_completion(  # pylint: disable=protected-access
         request,
         request_id,
@@ -351,7 +346,7 @@ async def request_chat_completion(
 
     assert all(finish_reason is not None for finish_reason in finish_reasons)
     use_function_calling, tool_calls_list = engine_base.process_function_call_output(
-        output_texts, finish_reasons, conversation
+        output_texts, finish_reasons
     )
 
     return engine_base.wrap_chat_completion_response(

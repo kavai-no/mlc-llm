@@ -402,26 +402,14 @@ class ChatCompletionRequest(BaseModel):
         if isinstance(self.tool_choice, str) and self.tool_choice != "auto":
             raise BadRequestError(f"Invalid tool_choice value: {self.tool_choice}")
 
-        # Check if we should use tool parser for custom format rendering
-        tools_rendered = None
-        if hasattr(conv_template, 'tool_parser_instance') and conv_template.tool_parser_instance:
-            from mlc_llm.serve.tool_parser import get_parser_instance  # pylint: disable=import-outside-toplevel
-            
-            # If tool parser has render_tools method, use it for format-specific rendering
-            if hasattr(conv_template.tool_parser_instance, 'render_tools'):
-                tools_rendered = conv_template.tool_parser_instance.render_tools(self.tools)
-        
-        # Fallback to JSON format if no custom renderer available
-        if tools_rendered is None:
-            function_list = []
-            for tool in self.tools:  # pylint: disable=not-an-iterable
-                if tool.type != "function":
-                    raise BadRequestError("Only 'function' tool type is supported")
-                function_list.append(tool.function.model_dump(by_alias=True))
-            tools_rendered = json.dumps(function_list)
+        function_list = []
+        for tool in self.tools:  # pylint: disable=not-an-iterable
+            if tool.type != "function":
+                raise BadRequestError("Only 'function' tool type is supported")
+            function_list.append(tool.function.model_dump(by_alias=True))
 
         conv_template.use_function_calling = True
-        conv_template.function_string = tools_rendered
+        conv_template.function_string = json.dumps(function_list)
 
 
 class ChatCompletionResponseChoice(BaseModel):
