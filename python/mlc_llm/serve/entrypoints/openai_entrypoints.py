@@ -23,6 +23,7 @@ from mlc_llm.protocol.openai_api_protocol import (
     ModelResponse,
 )
 from mlc_llm.serve import engine_base, engine_utils
+from mlc_llm.serve.qwen3_tool_parser import get_parser_instance
 from mlc_llm.serve.server import ServerContext
 
 
@@ -279,24 +280,24 @@ async def request_chat_completion(
         )
 
         async def completion_stream_generator() -> AsyncGenerator[str, None]:
-            parser = async_engine.conv_template.tool_parser_instance
             if isinstance(first_response, StopAsyncIteration):
                 yield "data: [DONE]\n\n"
                 return
             yield f"data: {first_response.model_dump_json(by_alias=True)}\n\n"
+            parser = None
+            if request.stream and async_engine.conv_template.tool_parser is not None:
+                parser = get_parser_instance(async_engine.conv_template.tool_parser)
             async for response in stream_generator:
                 if response.choices:
                     choice = response.choices[0]
                     content = choice.delta.content or ""
+                        
                     if parser:
                         try:
-                            parse_res = parser.parse_streaming(content)
-                            if parse_res:
-                                if parse_res["type"] == "complete_tool_call":
-                                    choice.delta.tool_calls = parse_res["data"]
-                                    choice.delta.content = ""
-                                elif parse_res["type"] == "partial_tool_call":
-                                    choice.delta.content = ""
+                            residue, extracted_calls = parser.parse_streaming(content)
+                            choice.delta.content = residue if residue else None
+                            if extracted_calls:
+                                choice.delta.tool_calls = extracted_calls
                         except Exception:
                             pass
                 yield f"data: {response.model_dump_json(by_alias=True)}\n\n"
