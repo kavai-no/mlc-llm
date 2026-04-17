@@ -3,19 +3,15 @@ import re
 import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type, TypeVar, Union
-from mlc_llm.protocol.openai_api_protocol import (
-    ChatToolCall,
-    ChatFunctionCall,
-)
+from mlc_llm.protocol.openai_api_protocol import ChatToolCall, ChatFunctionCall
 
 T = TypeVar('T', bound='BaseToolParser')
 
 class BaseToolParser(ABC):
-    """Abstract base class for all tool parsas."""
     @abstractmethod
     def parse(self, text: str) -> tuple[str, List[ChatToolCall]]:
         pass
-    
+
     @abstractmethod
     def parse_streaming(self, token: str) -> Any:
         pass
@@ -116,50 +112,80 @@ class Qwen3CoderToolCallParser(BaseToolParser):
     def parse_streaming(self, token: str) -> Any:
         self._buffer += token
         
-        # 1. Look for complete <tool_call> blocks in the buffer.
+        # 1. Check for completed matches in the buffer
         tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
         matches = list(tool_call_regex.finditer(self._buffer))
         
-        if not matches:
-            return None
-
-        # 2. Extract all complete tool calls from the buffer.
-        extracted_tool_calls: List[ChatToolCall] = []
-        last_end_idx = 0
-        
-        for m in matches:
-            block = m.group(1)
-            # Find <function=name>...</function> inside the block
-            func_match = re.search(s=r"<function=(.*?)>(.*?)</function>", block, re.DOTALL)
-            if not func_match:
-                continue
+        if matches:
+            # We found complete blocks! 
+            # The residue is everything before the first match.
+            first_match_start = matches[0].start()
+            residue = self._buffer[:first_match_start] if first_match_start > 0 else ""
             
-            func_name = func_match.group(1).strip()
-            params_content = func_match.group(2)
+            extracted_calls: List[ChatToolCall] = []
+            last_end_idx = 0
+            
+            for m in matches:
+                block = m.group(1)
+                # Parse function name and parameters within the block
+                func_match = re.search(r"<function=(.*?)>(.*?)</function>", block, re.DOTALL)
+                if not func_match:
+                    continue
+                
+                func_name = func_match.group(1).strip()
+                params_content = func_match.group(2)
 
-            param_dict = {}
-            # Extract parameters within the function block
-            param_matches = re.findall(r"<parameter=(.*?)>(.*?)</parameter>", params_content, re.DOTALL)
-            for p_name, p_val in param_matches:
-                p_name = p_name.strip()
-                p_val = p_val.strip()
-                param_dict[p_name] = _try_convert_value(p_val)
+                param_dict = {}
+                param_matches = re.findall(r"<parameter=(.*?)>(.*?)</parameter>", params_content, re.DOTALL)
+                for p_name, p_val in param_matches:
+                    p_name = p_name.strip()
+                    p_val = p_val.strip()
+                    param_dict[p_name] = _try_convert_value(p_val)
 
-            tc = ChatToolCall(
-                id=f"call_{uuid.uuid4().hex[:12]}",
-                type="function",
-                function=ChatFunctionCall(
-                    name=func_name,
-                    arguments=param_dict,
-                ),
-            )
-            extracted_tool_calls.append(tc)
-            last_end_idx = m.end()
+                tc = ChatToolCall(
+                    id=f"call_{uuid.uuid4().hex[:12]}",
+                    type="function",
+                    function=ChatFunctionCall(
+                        name=func_name,
+                        arguments=param_dict,
+                    ),
+                )
+                extracted_calls.append(tc)
+                last_end_idx = m.end()
 
-        # 3. The residue is everything after the last match's closing tag.
-        self._buffer = self._buffer[last_end_idx:]
+            # Update buffer: only keep what is after the last completed match.
+            self._buffer = self._buffer[last_end_idx:]
+            return residue, extracted_calls
+
+        # 2. No complete matches found. Check for "unclosed" potential tags to avoid buffering forever.
+        # We look for a partial tag start like '<tool_call' or '<function='
+        partial_tag_regex = re.compile(r"<tool_call|<function=")
+        partial_match = partial_tag_regex.search(self._buffer)
         
-        if extracted_tool_calls:
-            return {"type": "complete_tool_call", "data": extracted_tool_calls}
+        if partial_match:
+            # Found the start of an unclosed tag! 
+            # The residue is everything BEFORE this potential tag.
+            split_idx = partial_match.start()
+            residue = self._buffer[:split_idx] if split_idx > 0 else ""
+            
+            # We leave the partial tag in the buffer to continue accumulating tokens.
+            if split_idx > 0:
+                self._buffer = self._buffer[split_idx:]
+            
+            return residue, []
+        else:
+            # No complete tags and no unclosed tags found yet.
+            # To prevent text from being stuck in the buffer forever, we send it all as residue.
+            residue = self._buffer
+            self._buffer = ""
+            return residue, []
 
-        return None
+    def _try_convert(self, val: str) -> Any:
+        """Helper to convert string values from XML-like params."""
+        try:
+            if val.lower() == "true": return True
+            if val.lower() == "false": return False
+            return json.loads(val)
+        except (json.JSONDecodeError, TypeError):
+            return val
+

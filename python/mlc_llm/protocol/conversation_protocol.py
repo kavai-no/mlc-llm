@@ -1,12 +1,11 @@
 """The standard conversation protocol in MLC LLM"""
 
 from enum import Enum
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
-
 from pydantic import BaseModel, Field, field_validator
 
 
-# The message placeholders in the message prompts according to roles.
 class MessagePlaceholders(Enum):
     """The message placeholders in the message prompts according to roles."""
 
@@ -81,9 +80,11 @@ class Conversation(BaseModel):
     function_string: str = ""
     # whether using function calling or not, helps check for output message format in API call
     use_function_calling: bool = False
+    # The identifier for the tool parser (e.g., "qwen3_coder")
+    tool_parser: Optional[str] = None
 
     def __init__(self, role_templates: Optional[Dict[str, str]] = None, **kwargs):
-        # Defaults templates which would be overridden by model specific templates
+        # Defaults templates which would be enough to override by model specific templates
         _role_templates: Dict[str, str] = {
             "user": MessagePlaceholders.USER.value,
             "assistant": MessagePlaceholders.ASSISTANT.value,
@@ -109,6 +110,10 @@ class Conversation(BaseModel):
     def from_json_dict(cls: Type[T], json_dict: Dict[str, Any]) -> T:
         """Convert from a json dictionary"""
         return Conversation.model_validate(json_dict)
+
+    def clone(self) -> 'Conversation':
+        """Create a deep copy of this conversation."""
+        return self.model_copy(deep=True)
 
     # pylint: disable=too-many-branches
     def as_prompt(self, config=None) -> List[Any]:
