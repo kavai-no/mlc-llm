@@ -340,9 +340,21 @@ async def request_chat_completion(request: ChatCompletionRequest, raw_request: f
                 logprob_results[choice.index] += choice.logprobs.content
 
     assert all(finish_reason is not None for finish_reason in finish_reasons)
-    use_function_calling, tool_calls_list = engine_base.process_function_call_output(
-        output_texts, finish_reasons
-    )
+    if async_engine.conv_template.tool_parser:
+        parser = get_parser_instance(async_engine.conv_template.tool_parser)
+        residues = []
+        all_tool_calls = []
+        for text in output_texts:
+            res, calls = parser.parse(text)
+            residues.append(res)
+            all_tool_calls.extend(calls)
+        output_texts = residues
+        use_function_calling = len(all_tool_calls) > 0
+        tool_calls_list = all_tool_calls
+    else:
+        use_function_calling, tool_calls_list = engine_base.process_function_call_output(
+            output_texts, finish_reasons
+        )
 
     return engine_base.wrap_chat_completion_response(
         request_id=request_id,
