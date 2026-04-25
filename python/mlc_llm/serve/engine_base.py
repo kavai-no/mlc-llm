@@ -787,6 +787,7 @@ def process_chat_completion_stream_output(
     use_function_calling: bool,
     finish_reasons: List[Optional[str]],  # noqa: UP006
     conversation: Optional[Conversation] = None,
+    parser: Optional[Any] = None,
 ) -> Optional[openai_api_protocol.ChatCompletionStreamResponse]:
     """Process the delta outputs of a single request of ChatCompletion,
     convert the delta output to ChatCompletionStreamResponse and return.
@@ -840,10 +841,9 @@ def process_chat_completion_stream_output(
     # normal chunk
     assert len(delta_outputs) == request.n
     choices = []
-    if conversation is not None and conversation.tool_parser is not None:
+    # Use passed parser or create one if needed
+    if parser is None and conversation is not None and conversation.tool_parser is not None:
         parser = get_parser_instance(conversation.tool_parser)
-    else:
-        parser = None
     for i, delta_output in enumerate(delta_outputs):
         finish_reason_updated = False
         if delta_output.finish_reason is not None and finish_reasons[i] is None:
@@ -863,6 +863,10 @@ def process_chat_completion_stream_output(
                 
                 if res_text is not None:
                     content_to_send = res_text
+                else:
+                    # Parser is buffering (e.g., waiting for complete tool call)
+                    # Don't send the raw delta_text to the user
+                    content_to_send = ""
                 
                 for tc in extracted_calls:
                     tool_calls.append(tc)
@@ -876,7 +880,7 @@ def process_chat_completion_stream_output(
             index=i,
             finish_reason=finish_reasons[i],
             delta=openai_api_protocol.ChatCompletionMessage(
-                content=content_to_send if content_to_send else "", 
+                content=content_to_send if content_to_send else (None if tool_calls else ""), 
                 role="assistant", 
                 tool_calls=tool_calls if tool_calls else None
             ),
@@ -1238,6 +1242,40 @@ def process_function_call_output(
                 else:
                     finish_reasons[i] = "tool_calls"
     return use_function_calling, tool_calls_list
+
+
+def process_tool_parser_output(
+    output_texts: List[str],  # noqa: UP006
+    tool_parser_name: str,
+) -> Tuple[List[str], List[openai_api_protocol.ChatToolCall]]:  # noqa: UP006
+    """Process output texts using a tool parser.
+    
+    Parameters
+    ----------
+    output_texts : List[str]
+        The output texts from the model.
+    tool_parser_name : str
+        The name of the tool parser to use.
+        
+    Returns
+    -------
+    output_texts : List[str]
+        The modified output texts with tool calls removed.
+    tool_calls : List[ChatToolCall]
+        The list of extracted tool calls.
+    """
+    parser = get_parser_instance(tool_parser_name)
+    if parser is None:
+        return output_texts, []
+    
+    residues = []
+    all_tool_calls = []
+    for text in output_texts:
+        res, calls = parser.parse(text)
+        residues.append(res)
+        all_tool_calls.extend(calls)
+    
+    return residues, all_tool_calls
 
 
 def wrap_chat_completion_response(

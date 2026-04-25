@@ -278,22 +278,7 @@ async def request_chat_completion(request: ChatCompletionRequest, raw_request: f
                 yield "data: [DONE]\n\n"
                 return
             yield f"data: {first_response.model_dump_json(by_alias=True)}\n\n"
-            parser = None
-            if request.stream and async_engine.conv_template.tool_parser is not None:
-                parser = get_parser_instance(async_engine.conv_template.tool_parser)
             async for response in stream_generator:
-                if response.choices:
-                    choice = response.choices[0]
-                    content = choice.delta.content or ""
-                        
-                    if parser:
-                        try:
-                            residue, extracted_calls = parser.parse_streaming(content)
-                            choice.delta.content = residue or ""
-                            if extracted_calls:
-                                choice.delta.tool_calls = extracted_calls
-                        except Exception:
-                            pass
                 yield f"data: {response.model_dump_json(by_alias=True)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -331,8 +316,10 @@ async def request_chat_completion(request: ChatCompletionRequest, raw_request: f
                 request_final_usage.extra = None
 
         for choice in response.choices:
-            assert isinstance(choice.delta.content, str)
-            output_texts[choice.index] += choice.delta.content
+            # content can be None when there are tool calls
+            if choice.delta.content is not None:
+                assert isinstance(choice.delta.content, str)
+                output_texts[choice.index] += choice.delta.content
             if choice.finish_reason is not None and finish_reasons[choice.index] is None:
                 finish_reasons[choice.index] = choice.finish_reason
             if choice.logprobs is not None:
@@ -341,16 +328,11 @@ async def request_chat_completion(request: ChatCompletionRequest, raw_request: f
 
     assert all(finish_reason is not None for finish_reason in finish_reasons)
     if async_engine.conv_template.tool_parser:
-        parser = get_parser_instance(async_engine.conv_template.tool_parser)
-        residues = []
-        all_tool_calls = []
-        for text in output_texts:
-            res, calls = parser.parse(text)
-            residues.append(res)
-            all_tool_calls.extend(calls)
-        output_texts = residues
-        use_function_calling = len(all_tool_calls) > 0
-        tool_calls_list = all_tool_calls
+        output_texts, tool_calls = engine_base.process_tool_parser_output(
+            output_texts, async_engine.conv_template.tool_parser
+        )
+        use_function_calling = len(tool_calls) > 0
+        tool_calls_list = tool_calls
     else:
         use_function_calling, tool_calls_list = engine_base.process_function_call_output(
             output_texts, finish_reasons

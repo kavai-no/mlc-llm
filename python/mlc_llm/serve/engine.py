@@ -1022,8 +1022,10 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                     request_final_usage = response.usage
                     continue
                 for choice in response.choices:
-                    assert isinstance(choice.delta.content, str)
-                    output_texts[choice.index] += choice.delta.content
+                    # content can be None when there are tool calls
+                    if choice.delta.content is not None:
+                        assert isinstance(choice.delta.content, str)
+                        output_texts[choice.index] += choice.delta.content
                     if choice.finish_reason is not None and finish_reasons[choice.index] is None:
                         finish_reasons[choice.index] = choice.finish_reason
                     if choice.logprobs is not None:
@@ -1038,16 +1040,11 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
 
         assert all(finish_reason is not None for finish_reason in finish_reasons)
         if self.conv_template.tool_parser:
-            parser = get_parser_instance(self.conv_template.tool_parser)
-            residues = []
-            all_tool_calls = []
-            for text in output_texts:
-                res, calls = parser.parse(text)
-                residues.append(res)
-                all_tool_calls.extend(calls)
-            output_texts = residues
-            use_function_calling = len(all_tool_calls) > 0
-            tool_calls_list = all_tool_calls
+            output_texts, tool_calls = engine_base.process_tool_parser_output(
+                output_texts, self.conv_template.tool_parser
+            )
+            use_function_calling = len(tool_calls) > 0
+            tool_calls_list = tool_calls
         else:
             use_function_calling, tool_calls_list = engine_base.process_function_call_output(
                 output_texts, finish_reasons
@@ -1218,6 +1215,12 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         # prompt length is not used
         _ = prompt_length
         finish_reasons: List[Optional[str]] = [None for _ in range(generation_cfg.n)]  # noqa: UP006
+        
+        # Create tool parser once for the entire request to maintain state across chunks
+        parser = None
+        if use_function_calling and self.conv_template.tool_parser:
+            parser = get_parser_instance(self.conv_template.tool_parser)
+        
         self.state.record_event(request_id, event="invoke generate")
         try:
             async for delta_outputs in self._generate(
@@ -1232,6 +1235,7 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                     self.state,
                     use_function_calling,
                     finish_reasons,
+                    parser=parser,
                 )
 
                 if response is not None:
@@ -1602,8 +1606,10 @@ class MLCEngine(engine_base.MLCEngineBase):
                 request_final_usage = response.usage
                 continue
             for choice in response.choices:
-                assert isinstance(choice.delta.content, str)
-                output_texts[choice.index] += choice.delta.content
+                # content can be None when there are tool calls
+                if choice.delta.content is not None:
+                    assert isinstance(choice.delta.content, str)
+                    output_texts[choice.index] += choice.delta.content
                 if choice.finish_reason is not None and finish_reasons[choice.index] is None:
                     finish_reasons[choice.index] = choice.finish_reason
                 if choice.logprobs is not None:
@@ -1612,16 +1618,11 @@ class MLCEngine(engine_base.MLCEngineBase):
 
         assert all(finish_reason is not None for finish_reason in finish_reasons)
         if self.conv_template.tool_parser:
-            parser = get_parser_instance(self.conv_template.tool_parser)
-            residues = []
-            all_tool_calls = []
-            for text in output_texts:
-                res, calls = parser.parse(text)
-                residues.append(res)
-                all_tool_calls.extend(calls)
-            output_texts = residues
-            use_function_calling = len(all_tool_calls) > 0
-            tool_calls_list = all_tool_calls
+            output_texts, tool_calls = engine_base.process_tool_parser_output(
+                output_texts, self.conv_template.tool_parser
+            )
+            use_function_calling = len(tool_calls) > 0
+            tool_calls_list = tool_calls
         else:
             use_function_calling, tool_calls_list = engine_base.process_function_call_output(
                 output_texts, finish_reasons
@@ -1789,6 +1790,12 @@ class MLCEngine(engine_base.MLCEngineBase):
         _ = prompt_length
 
         finish_reasons: List[Optional[str]] = [None for _ in range(generation_cfg.n)]  # noqa: UP006
+        
+        # Create tool parser once for the entire request to maintain state across chunks
+        parser = None
+        if use_function_calling and conversation is not None and conversation.tool_parser:
+            parser = get_parser_instance(conversation.tool_parser)
+        
         self.state.record_event(request_id, event="invoke generate")
         for delta_outputs in self._generate(prompts, generation_cfg, request_id):
             response = engine_base.process_chat_completion_stream_output(
@@ -1799,6 +1806,7 @@ class MLCEngine(engine_base.MLCEngineBase):
                 use_function_calling,
                 finish_reasons,
                 conversation,
+                parser=parser,
             )
             if response is not None:
                 yield response

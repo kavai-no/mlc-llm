@@ -1,7 +1,6 @@
 """The standard conversation protocol in MLC LLM"""
 
 from enum import Enum
-from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union  # noqa: UP035
 
 from pydantic import BaseModel, Field, field_validator
