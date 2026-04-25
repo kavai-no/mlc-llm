@@ -16,6 +16,14 @@ class BaseToolParser(ABC):
     def parse_streaming(self, token: str) -> Any:
         pass
 
+    @abstractmethod
+    def render_tool_call(self, tool_call: ChatToolCall) -> str:
+        pass
+
+    @abstractmethod
+    def render_tool_result(self, tool_call_id: str, result: str) -> str:
+        pass
+
 # Global registry for parser lookup during hydration
 PARSER_REGISTRY: Dict[str, Type[BaseToolParser]] = {}
 
@@ -188,4 +196,21 @@ class Qwen3CoderToolCallParser(BaseToolParser):
             return json.loads(val)
         except (json.JSONDecodeError, TypeError):
             return val
+
+    def render_tool_call(self, tool_call: ChatToolCall) -> str:
+        """Render a tool call into Qwen3 XML format."""
+        func = tool_call.function
+        params = func.arguments if isinstance(func.arguments, dict) else json.loads(func.arguments)
+        
+        param_str = ""
+        for k, v in params.items():
+            param_str += f"<parameter={k}>{v}</parameter>"
+            
+        return f"<tool_call><function={func.name}>{param_str}</function></tool_call>"
+
+    def render_tool_result(self, tool_call_id: str, result: str) -> str:
+        """Render a tool result into Qwen3 XML format."""
+        # Note: Qwen3 results often just use <tool_response> or similar.
+        # Based on common patterns for this model:
+        return f"<tool_response>\n{result}\n</tool_response>"
 

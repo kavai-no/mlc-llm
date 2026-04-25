@@ -159,6 +159,16 @@ class Conversation(BaseModel):
                 else self.roles[role] + self.role_content_sep
             )
             if isinstance(content, str):
+                if role == "tool" and self.tool_parser:
+                    from ..serve import qwen3_tool_parser
+                    parser = qwen3_tool_parser.get_parser_instance(self.tool_parser)
+                    if parser:
+                        # For tool results, we usually don't have a call_id in the string 
+                        # unless it's structured. We just render the content.
+                        message = parser.render_tool_result("", content)
+                        message_list.append(role_prefix + message + separator)
+                        continue
+
                 message_list.append(
                     role_prefix
                     + self.role_templates[role].replace(
@@ -178,6 +188,17 @@ class Conversation(BaseModel):
                         MessagePlaceholders[role.upper()].value, item["text"]
                     )
                     message_list.append(message)
+                elif item["type"] == "tool_call":
+                    if self.tool_parser:
+                        from ..serve import qwen3_tool_parser
+                        parser = qwen3_tool_parser.get_parser_instance(self.tool_parser)
+                        if parser:
+                            rendered = parser.render_tool_call(item["tool_call"])
+                            message_list.append(rendered)
+                            continue
+                    # Fallback to JSON string if no parser available
+                    import json
+                    message_list.append(f"Tool Call: {json.dumps(item['tool_call'])}")
                 elif item["type"] == "image_url":
                     assert config is not None, "Model config is required"
                     image_url = _get_url_from_item(item)
