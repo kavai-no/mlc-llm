@@ -75,9 +75,16 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         if not text.strip():
             return text, []
 
-        # Find all <tool_call> blocks
-        tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-        matches = list(tool_call_regex.finditer(text))
+        # Qwen3 outputs tool calls in this format:
+        # <function=name><parameter=key>value</parameter>...</function></tool_call>
+        # Note: The opening <tool_call> is missing, only </tool_call> appears at the end.
+        
+        # Find all function blocks that end with </function></tool_call>
+        func_regex = re.compile(
+            r"<function=(.*?)>(.*?)</function>\s*</tool_call>",
+            re.DOTALL
+        )
+        matches = list(func_regex.finditer(text))
         
         if not matches:
             return text, []
@@ -88,18 +95,14 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         
         tool_calls: List[ChatToolCall] = []
         for m in matches:
-            block = m.group(1)
-            # Find <function=name>...</function> inside the block
-            func_match = re.search(r"<function=(.*?)>(.*?)</function>", block, re.DOTALL)
-            if not func_match:
-                continue
-            
-            func_name = func_match.group(1).strip()
-            params_content = func_match.group(2)
+            func_name = m.group(1).strip()
+            params_content = m.group(2)
 
             param_dict = {}
             # Extract parameters within the function block
-            param_matches = re.findall(r"<parameter=(.*?)>(.*?)</parameter>", params_content, re.DOTALL)
+            param_matches = re.findall(
+                r"<parameter=(.*?)>(.*?)</parameter>", params_content, re.DOTALL
+            )
             for p_name, p_val in param_matches:
                 p_name = p_name.strip()
                 p_val = p_val.strip()
@@ -120,12 +123,19 @@ class Qwen3CoderToolCallParser(BaseToolParser):
     def parse_streaming(self, token: str) -> Any:
         self._buffer += token
         
-        # 1. Check for completed matches in the buffer
-        tool_call_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-        matches = list(tool_call_regex.finditer(self._buffer))
+        # Qwen3 outputs tool calls in this format:
+        # <function=name><parameter=key>value</parameter>...</function></tool_call>
+        # Note: The opening <tool_call> is missing, only </tool_call> appears at the end.
+        
+        # Check for complete function blocks that end with </function></tool_call>
+        func_regex = re.compile(
+            r"<function=(.*?)>(.*?)</function>\s*</tool_call>",
+            re.DOTALL
+        )
+        matches = list(func_regex.finditer(self._buffer))
         
         if matches:
-            # We found complete blocks! 
+            # We found complete function blocks!
             # The residue is everything before the first match.
             first_match_start = matches[0].start()
             residue = self._buffer[:first_match_start] if first_match_start > 0 else ""
@@ -134,22 +144,18 @@ class Qwen3CoderToolCallParser(BaseToolParser):
             last_end_idx = 0
             
             for m in matches:
-                block = m.group(1)
-                # Parse function name and parameters within the block
-                func_match = re.search(r"<function=(.*?)>(.*?)</function>", block, re.DOTALL)
-                if not func_match:
-                    continue
+                func_name = m.group(1).strip()
+                params_content = m.group(2)
                 
-                func_name = func_match.group(1).strip()
-                params_content = func_match.group(2)
-
                 param_dict = {}
-                param_matches = re.findall(r"<parameter=(.*?)>(.*?)</parameter>", params_content, re.DOTALL)
+                param_matches = re.findall(
+                    r"<parameter=(.*?)>(.*?)</parameter>", params_content, re.DOTALL
+                )
                 for p_name, p_val in param_matches:
                     p_name = p_name.strip()
                     p_val = p_val.strip()
                     param_dict[p_name] = _try_convert_value(p_val)
-
+                
                 tc = ChatToolCall(
                     id=f"call_{uuid.uuid4().hex[:12]}",
                     type="function",
@@ -160,30 +166,32 @@ class Qwen3CoderToolCallParser(BaseToolParser):
                 )
                 extracted_calls.append(tc)
                 last_end_idx = m.end()
-
+            
             # Update buffer: only keep what is after the last completed match.
             self._buffer = self._buffer[last_end_idx:]
             return residue, extracted_calls
-
-        # 2. No complete matches found. Check for "unclosed" potential tags to avoid buffering forever.
-        # We look for a partial tag start like '<tool_call' or '<function='
-        partial_tag_regex = re.compile(r"<tool_call|<function=")
+        
+        # Check for "unclosed" potential tags.
+        # We look for the start of any tool call related tags.
+        partial_tag_regex = re.compile(
+            r"<function|<parameter|</parameter|</function|</tool_call"
+        )
         partial_match = partial_tag_regex.search(self._buffer)
         
         if partial_match:
-            # Found the start of an unclosed tag! 
-            # The residue is everything BEFORE this potential tag.
+            # Found the start of a potential tag!
+            # Return everything BEFORE this tag as residue.
             split_idx = partial_match.start()
             residue = self._buffer[:split_idx] if split_idx > 0 else ""
             
-            # We leave the partial tag in the buffer to continue accumulating tokens.
+            # Keep the partial tag in the buffer.
             if split_idx > 0:
                 self._buffer = self._buffer[split_idx:]
             
             return residue, []
         else:
-            # No complete tags and no unclosed tags found yet.
-            # To prevent text from being stuck in the buffer forever, we send it all as residue.
+            # No tool call tags found at all.
+            # Flush everything as residue.
             residue = self._buffer
             self._buffer = ""
             return residue, []
