@@ -864,8 +864,8 @@ def process_chat_completion_stream_output(
                 if res_text is not None:
                     content_to_send = res_text
                 else:
-                    # Parser is buffering (e.g., waiting for complete tool call)
-                    # Don't send the raw delta_text to the user
+                    # Parser is buffering (e.g., waiting for complete tool call).
+                    # We MUST suppress the raw delta_text to prevent leaking XML tags.
                     content_to_send = ""
                 
                 for tc in extracted_calls:

@@ -173,6 +173,8 @@ async def request_completion(request: CompletionRequest, raw_request: fastapi.Re
                 return
             yield f"data: {first_response.model_dump_json(by_alias=True)}\n\n"
             async for response in stream_generator:
+                # The engine_base already handles suppressing content_to_send 
+                # when the parser is buffering. We just yield what it gives us.
                 yield f"data: {response.model_dump_json(by_alias=True)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -279,6 +281,8 @@ async def request_chat_completion(request: ChatCompletionRequest, raw_request: f
                 return
             yield f"data: {first_response.model_dump_json(by_alias=True)}\n\n"
             async for response in stream_generator:
+                # The engine_base already handles suppressing content_to_send 
+                # when the parser is buffering. We just yield what it gives us.
                 yield f"data: {response.model_dump_json(by_alias=True)}\n\n"
             yield "data: [DONE]\n\n"
 

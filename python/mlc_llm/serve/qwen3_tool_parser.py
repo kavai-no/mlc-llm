@@ -89,21 +89,25 @@ class Qwen3CoderToolCallParser(BaseToolParser):
 
     def __init__(self):
         self._buffer = ""
+        # State machine states: 'TEXT', 'BUFFERING'
+        self._state = "TEXT"
 
     def parse(self, text: str) -> tuple[str, List[ChatToolCall]]:
         """Parse non-streaming complete text."""
-        if not text.strip():
-            return text, []
-
-        tool_calls: List[ChatToolCall] = []
+        # For non-streaming, we can just use the streaming logic by feeding it all at once.
+        # We reset state to ensure a clean start.
+        self._state = "TEXT"
+        self._buffer = ""
+        
         content_parts = []
+        tool_calls = []
+        
+        # Use the same logic as parse_streaming but in a loop for the whole text
+        # To simplify, we'll just use regex on the full text.
         last_end = 0
-
-        # Find all <tool_call> blocks
         tool_call_pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-        matches = list(tool_call_pattern.finditer(text))
-
-        for match in matches:
+        
+        for match in tool_call_pattern.finditer(text):
             content_parts.append(text[last_end:match.start()])
             inner_content = match.group(1)
             
@@ -135,17 +139,18 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         return "".join(content_parts), tool_calls
 
     def parse_streaming(self, token: str) -> tuple[Optional[str], List[ChatToolCall]]:
-        """Parse streaming token."""
+        """Parse streaming token using a state machine to prevent XML leakage."""
         self._buffer += token
         tool_calls: List[ChatToolCall] = []
         content_to_send: Optional[str] = None
 
-        # 1. Check for complete <tool_call> block
+        # 1. Check if we have a complete <tool_call> block in the buffer.
         tool_call_pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
         match = tool_call_pattern.search(self._buffer)
 
         if match:
-            # Everything before the <tool_call> is content to send
+            # We found a complete block!
+            # Everything before the <tool_call> is content to send.
             content_to_send = self._buffer[:match.start()]
             inner_content = match.group(1)
             
@@ -175,13 +180,14 @@ class Qwen3CoderToolCallParser(BaseToolParser):
             # Update buffer to everything AFTER the </tool_call> tag
             self._buffer = self._buffer[match.end():]
             
+            # If there's trailing text in this chunk after the tool call, return it too
             if self._buffer:
                 content_to_send += self._buffer
                 self._buffer = ""
                 
             return content_to_send, tool_calls
 
-        # 2. If we are currently inside a <tool_call> block (but not finished)
+        # 2. Check if we are currently inside a <tool_call> block (but not finished)
         if "<tool_call>" in self._buffer:
             idx = self._buffer.index("<tool_call>")
             if idx > 0:
@@ -193,12 +199,10 @@ class Qwen3CoderToolCallParser(BaseToolParser):
                 # The tool call starts at index 0. Buffer everything and return None.
                 return None, []
 
-        # 3. CRITICAL FIX: Check if the buffer contains the START of a potential tool call.
-        # If it contains '<', we might be in the middle of '<tool_call>' or '<function='.
-        # We must NOT flush as text to avoid leaking partial XML tags like '<fu'.
+        # 3. Check if we have seen the start of a potential tag (e.g., '<')
         if "<" in self._buffer:
-            # Check if it's just a lone '<' that isn't part of a tag. 
-            # For simplicity and safety, we buffer anything starting with '<'.
+            # We found a '<'. It might be '<tool_call' or '<function='.
+            # To prevent leaking '<fu', we must buffer it and return None.
             return None, []
 
         # 4. No tool call markers detected at all; flush everything as text.
