@@ -89,25 +89,21 @@ class Qwen3CoderToolCallParser(BaseToolParser):
 
     def __init__(self):
         self._buffer = ""
-        # State machine states: 'TEXT', 'BUFFERING'
-        self._state = "TEXT"
 
     def parse(self, text: str) -> tuple[str, List[ChatToolCall]]:
         """Parse non-streaming complete text."""
-        # For non-streaming, we can just use the streaming logic by feeding it all at once.
-        # We reset state to ensure a clean start.
-        self._state = "TEXT"
-        self._buffer = ""
-        
+        if not text.strip():
+            return text, []
+
+        tool_calls: List[ChatToolCall] = []
         content_parts = []
-        tool_calls = []
-        
-        # Use the same logic as parse_streaming but in a loop for the whole text
-        # To simplify, we'll just use regex on the full text.
         last_end = 0
+
+        # Find all <tool_call> blocks
         tool_call_pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-        
-        for match in tool_call_pattern.finditer(text):
+        matches = list(tool_call_pattern.finditer(text))
+
+        for match in matches:
             content_parts.append(text[last_end:match.start()])
             inner_content = match.group(1)
             
@@ -139,18 +135,17 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         return "".join(content_parts), tool_calls
 
     def parse_streaming(self, token: str) -> tuple[Optional[str], List[ChatToolCall]]:
-        """Parse streaming token using a state machine to prevent XML leakage."""
+        """Parse streaming token."""
         self._buffer += token
         tool_calls: List[ChatToolCall] = []
         content_to_send: Optional[str] = None
 
-        # 1. Check if we have a complete <tool_call> block in the buffer.
+        # 1. Check for complete <tool_call> block
         tool_call_pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
         match = tool_call_pattern.search(self._buffer)
 
         if match:
-            # We found a complete block!
-            # Everything before the <tool_call> is content to send.
+            # Everything before the <tool_call> is content to send
             content_to_send = self._buffer[:match.start()]
             inner_content = match.group(1)
             
@@ -180,7 +175,6 @@ class Qwen3CoderToolCallParser(BaseToolParser):
             # Update buffer to everything AFTER the </tool_call> tag
             self._buffer = self._buffer[match.end():]
             
-            # If there's trailing text in this chunk after the tool call, return it too
             if self._buffer:
                 content_to_send += self._buffer
                 self._buffer = ""
@@ -188,8 +182,9 @@ class Qwen3CoderToolCallParser(BaseToolParser):
             return content_to_send, tool_calls
 
         # 2. Check if we are currently inside a <tool_call> block (but not finished)
-        if "<tool_call>" in self._buffer:
-            idx = self._buffer.index("<tool_call>")
+        if "<tool_call" in self._buffer:
+            # We find the start of the tag to see if there is text before it
+            idx = self._buffer.find("<tool_call")
             if idx > 0:
                 # There is text before the <tool_call> tag. Send it and buffer the rest.
                 content_to_send = self._buffer[:idx]
@@ -199,13 +194,7 @@ class Qwen3CoderToolCallParser(BaseToolParser):
                 # The tool call starts at index 0. Buffer everything and return None.
                 return None, []
 
-        # 3. Check if we have seen the start of a potential tag (e.g., '<')
-        if "<" in self._buffer:
-            # We found a '<'. It might be '<tool_call' or '<function='.
-            # To prevent leaking '<fu', we must buffer it and return None.
-            return None, []
-
-        # 4. No tool call markers detected at all; flush everything as text.
+        # 3. No <tool_call> tag in the buffer; flush as text.
         content_to_send = self._buffer
         self._buffer = ""
         return content_to_send, []
@@ -214,11 +203,7 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         """Render a tool call to XML format."""
         func = tool_call.function
         params = func.arguments if isinstance(func.arguments, dict) else json.loads(func.arguments)
-        
-        param_str = ""
-        for k, v in params.items():
-            param_str += f"<parameter={k}>{v}</parameter>"
-        
+        param_str = "".join([f"<parameter={k}>{v}</parameter>\n" for k, v in params.items()])
         return f"<tool_call><function={func.name}>{param_str}</function></tool_call>"
 
     def render_tool_result(self, tool_call_id: str, result: str) -> str:

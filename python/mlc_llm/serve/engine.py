@@ -1218,7 +1218,7 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         
         # Create tool parser once for the entire request to maintain state across chunks
         parser = None
-        if use_function_calling and self.conv_template.tool_parser:
+        if self.conv_template.tool_parser:
             parser = get_parser_instance(self.conv_template.tool_parser)
         
         self.state.record_event(request_id, event="invoke generate")
