@@ -841,9 +841,14 @@ def process_chat_completion_stream_output(
     # normal chunk
     assert len(delta_outputs) == request.n
     choices = []
-    # Use passed parser or create one if needed
-    if parser is None and conversation is not None and conversation.tool_parser is not None:
+    if parser is not None:
+        # Use the provided stateful parser instead of creating a new one.
+        pass
+    elif conversation is not None and conversation.tool_parser is not None:
         parser = get_parser_instance(conversation.tool_parser)
+    else:
+        # No tool parser available; proceed with normal text processing
+        pass
     for i, delta_output in enumerate(delta_outputs):
         finish_reason_updated = False
         if delta_output.finish_reason is not None and finish_reasons[i] is None:
@@ -856,7 +861,7 @@ def process_chat_completion_stream_output(
         content_to_send = delta_output.delta_text
         tool_calls: List[openai_api_protocol.ChatToolCall] = []
 
-        if use_function_calling and conversation is not None and conversation.tool_parser is not None:
+        if conversation is not None and conversation.tool_parser is not None:
             if parser is not None:
                 # The parser tracks its own internal buffer. We feed it the new chunk.
                 res_text, extracted_calls = parser.parse_streaming(delta_output.delta_text)

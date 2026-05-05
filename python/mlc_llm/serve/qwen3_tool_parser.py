@@ -2,7 +2,7 @@ import json
 import re
 import uuid
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Type, TypeVar
+from typing import Any, Dict, List, Optional, Type, TypeVar, Union
 
 from mlc_llm.protocol.openai_api_protocol import ChatToolCall, ChatFunctionCall
 
@@ -76,128 +76,114 @@ def _try_convert_value(value: str) -> Any:
 @register_parser("qwen3_coder")
 class Qwen3CoderToolCallParser(BaseToolParser):
     """
-    Parser for Qwen3-Coder XML-style tool calls.
-
-    Model output format:
-    <tool_call>
-    <function=name>
-    <parameter=key>value</parameter>
-    ...
-    </function>
-    </tool_call>
+    Robust parser for Qwen3-Coder XML-style tool calls.
+    Uses a state-aware buffer to prevent partial tool calls from being 
+    incorrectly flushed as text during streaming.
     """
 
     def __init__(self):
         self._buffer = ""
+        self._in_tool_call_block = False
 
     def parse(self, text: str) -> tuple[str, List[ChatToolCall]]:
         """Parse non-streaming complete text."""
-        if not text.strip():
-            return text, []
-
+        # Reset state for a fresh parse
+        self._buffer = text
+        self._in_tool_call_block = False
+        
         tool_calls: List[ChatToolCall] = []
         content_parts = []
         last_end = 0
 
-        # Find all <tool_call> blocks
-        tool_call_pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-        matches = list(tool_call_pattern.finditer(text))
-
-        for match in matches:
+        pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+        for match in pattern.finditer(text):
             content_parts.append(text[last_end:match.start()])
-            inner_content = match.group(1)
+            inner = match.group(1)
             
             func_pattern = re.compile(r"<function=(.*?)>(.*?)</function>", re.DOTALL)
-            for func_match in func_pattern.finditer(inner_content):
-                func_name = func_match.group(1).strip()
-                func_body = func_match.group(2)
-
-                param_dict: Dict[str, Any] = {}
-                param_pattern = re.compile(r"<parameter=(.*?)>(.*?)</parameter>", re.DOTALL)
-                for p_match in param_pattern.finditer(func_body):
-                    key = p_match.group(1).strip()
-                    val = p_match.group(2).strip()
-                    param_dict[key] = _try_convert_value(val)
-
-                tool_calls.append(
-                    ChatToolCall(
-                        id=f"call_{uuid.uuid4().hex[:12]}",
-                        type="function",
-                        function=ChatFunctionCall(
-                            name=func_name,
-                            arguments=param_dict,
-                        ),
-                    )
-                )
+            for f_match in func_pattern.finditer(inner):
+                f_name = f_match.group(1).strip()
+                f_body = f_match.group(2)
+                
+                params = {}
+                p_pattern = re.compile(r"<parameter=(.*?)>(.*?)</parameter>", re.DOTALL)
+                for p_match in p_pattern.finditer(f_body):
+                    params[p_match.group(1).strip()] = _try_convert_value(p_match.group(2))
+                
+                tool_calls.append(ChatToolCall(
+                    id=f"call_{uuid.uuid4().hex[:12]}",
+                    type="function",
+                    function=ChatFunctionCall(name=f_name, arguments=params)
+                ))
             last_end = match.end()
-
+        
         content_parts.append(text[last_end:])
         return "".join(content_parts), tool_calls
 
     def parse_streaming(self, token: str) -> tuple[Optional[str], List[ChatToolCall]]:
-        """Parse streaming token."""
+        """Parse streaming token with state awareness."""
         self._buffer += token
-        tool_calls: List[ChatToolCall] = []
-        content_to_send: Optional[str] = None
+        tool_calls = []
+        content_to_send = None
 
-        # 1. Check for complete <tool_call> block
-        tool_call_pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
-        match = tool_call_pattern.search(self._buffer)
-
+        # 1. Check if we have a complete block in the buffer
+        pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+        match = pattern.search(self._buffer)
         if match:
-            # Everything before the <tool_call> is content to send
             content_to_send = self._buffer[:match.start()]
-            inner_content = match.group(1)
+            inner = match.group(1)
             
             func_pattern = re.compile(r"<function=(.*?)>(.*?)</function>", re.DOTALL)
-            for func_match in func_pattern.finditer(inner_content):
-                func_name = func_match.group(1).strip()
-                func_body = func_match.group(2)
-
-                param_dict: Dict[str, Any] = {}
-                param_pattern = re.compile(r"<parameter=(.*?)>(.*?)</parameter>", re.DOTALL)
-                for p_match in param_pattern.finditer(func_body):
-                    key = p_match.group(1).strip()
-                    val = p_match.group(2).strip()
-                    param_dict[key] = _try_convert_value(val)
-
-                tool_calls.append(
-                    ChatToolCall(
-                        id=f"call_{uuid.uuid4().hex[:12]}",
-                        type="function",
-                        function=ChatFunctionCall(
-                            name=func_name,
-                            arguments=param_dict,
-                        ),
-                    )
-                )
-
-            # Update buffer to everything AFTER the </tool_call> tag
-            self._buffer = self._buffer[match.end():]
+            for f_match in func_pattern.finditer(inner):
+                f_name = f_match.group(1).strip()
+                f_body = f_match.group(2)
+                params = {}
+                p_pattern = re.compile(r"<parameter=(.*?)>(.*?)</parameter>", re.DOTALL)
+                for p_match in p_pattern.finditer(f_body):
+                    params[p_match.group(1).strip()] = _try_convert_value(p_match.group(2))
+                
+                tool_calls.append(ChatToolCall(
+                    id=f"call_{uuid.uuid4().hex[:12]}",
+                    type="function",
+                    function=ChatFunctionCall(name=f_name, arguments=params)
+                ))
             
+            self._buffer = self._buffer[match.end():]
+            # If there's leftover text after the </tool_call>, it belongs to the next segment
             if self._buffer:
                 content_to_send += self._buffer
                 self._buffer = ""
-                
+            
+            self._in_tool_call_block = False
             return content_to_send, tool_calls
 
         # 2. Check if we are currently inside a <tool_call> block (but not finished)
         if "<tool_call" in self._buffer:
-            # We find the start of the tag to see if there is text before it
+            self._in_tool_call_block = True
             idx = self._buffer.find("<tool_call")
             if idx > 0:
-                # There is text before the <tool_call> tag. Send it and buffer the rest.
+                # We have text BEFORE the tool call starts. Flush it.
                 content_to_send = self._buffer[:idx]
                 self._buffer = self._buffer[idx:]
                 return content_to_send, []
             else:
-                # The tool call starts at index 0. Buffer everything and return None.
+                # The buffer starts with '<tool_call'. Do NOT flush anything.
                 return None, []
 
-        # 3. No <tool_call> tag in the buffer; flush as text.
-        content_to_send = self._buffer
-        self._buffer = ""
-        return content_to_send, []
+        # 3. If we are in a tool call block but no complete match was found, 
+        # do NOT flush the buffer as text. Keep it for the next token.
+        if self._in_tool_call_block:
+            # We check if the buffer has become something that is clearly NOT a tool call
+            # (e.g., if the model hallucinated and closed it incorrectly, though regex handles that)
+            return None, []
+
+        # 4. No tool call in sight; flush as normal text.
+        if self._buffer:
+            content_to_send = self._buffer
+            self._buffer = ""
+            return content_to_send, []
+        
+        return None, []
 
     def render_tool_call(self, tool_call: ChatToolCall) -> str:
         """Render a tool call to XML format."""
