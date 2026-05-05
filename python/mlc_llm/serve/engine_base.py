@@ -861,20 +861,27 @@ def process_chat_completion_stream_output(
         content_to_send = delta_output.delta_text
         tool_calls: List[openai_api_protocol.ChatToolCall] = []
 
-        if conversation is not None and conversation.tool_parser is not None:
-            if parser is not None:
-                # The parser tracks its own internal buffer. We feed it the new chunk.
-                res_text, extracted_calls = parser.parse_streaming(delta_output.delta_text)
-                
-                if res_text is not None:
-                    content_to_send = res_text
-                else:
-                    # Parser is buffering (e.g., waiting for complete tool call).
-                    # We MUST suppress the raw delta_text to prevent leaking XML tags.
-                    content_to_send = ""
-                
-                for tc in extracted_calls:
-                    tool_calls.append(tc)
+        if parser is not None:
+            print(f"[DEBUG] engine_base.py: using parser {type(parser)} for chunk `{delta_output.delta_text}`")
+            # The parser tracks its own internal buffer. We feed it the new chunk.
+            res_text, extracted_calls = parser.parse_streaming(delta_output.delta_text)
+            
+            if res_text is not None:
+                content_to_send = res_text
+            else:
+                # Parser is buffering (e.g., waiting for complete tool call).
+                # We MUST suppress the raw delta_text to prevent leaking XML tags.
+                content_to_send = ""
+            
+            for tc in extracted_calls:
+                tool_calls.append(tc)
+        elif conversation is not None and conversation.tool_parser is not None:
+            # This fallback should ideally not be reached if parser was passed from engine.py
+            print(f"[DEBUG] engine_base.py: fallback to creating parser in loop")
+            parser = get_parser_instance(conversation.tool_parser)
+            res_text, extracted_calls = parser.parse_streaming(delta_output.delta_text)
+            # ... (rest of logic if needed, but engine.py should have passed it)
+
 
         if not finish_reason_updated and content_to_send == "":
             # Ignore empty delta text when finish reason is not updated.

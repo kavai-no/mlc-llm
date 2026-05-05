@@ -78,7 +78,7 @@ class Qwen3CoderToolCallParser(BaseToolParser):
     """
     Robust parser for Qwen3-Coder XML-style tool calls.
     Uses a state-aware buffer to prevent partial tool calls from being 
-    incorrectly flushed as text during streaming.
+    incorrectly flushed as text.
     """
 
     def __init__(self):
@@ -87,7 +87,6 @@ class Qwen3CoderToolCallParser(BaseToolParser):
 
     def parse(self, text: str) -> tuple[str, List[ChatToolCall]]:
         """Parse non-streaming complete text."""
-        # Reset state for a fresh parse
         self._buffer = text
         self._in_tool_call_block = False
         
@@ -126,7 +125,6 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         tool_calls = []
         content_to_send = None
 
-        # 1. Check if we have a complete block in the buffer
         pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
         match = pattern.search(self._buffer)
         if match:
@@ -149,7 +147,6 @@ class Qwen3CoderToolCallParser(BaseToolParser):
                 ))
             
             self._buffer = self._buffer[match.end():]
-            # If there's leftover text after the </tool_call>, it belongs to the next segment
             if self._buffer:
                 content_to_send += self._buffer
                 self._buffer = ""
@@ -157,27 +154,19 @@ class Qwen3CoderToolCallParser(BaseToolParser):
             self._in_tool_call_block = False
             return content_to_send, tool_calls
 
-        # 2. Check if we are currently inside a <tool_call> block (but not finished)
         if "<tool_call" in self._buffer:
             self._in_tool_call_block = True
             idx = self._buffer.find("<tool_call")
             if idx > 0:
-                # We have text BEFORE the tool call starts. Flush it.
                 content_to_send = self._buffer[:idx]
                 self._buffer = self._buffer[idx:]
                 return content_to_send, []
             else:
-                # The buffer starts with '<tool_call'. Do NOT flush anything.
                 return None, []
 
-        # 3. If we are in a tool call block but no complete match was found, 
-        # do NOT flush the buffer as text. Keep it for the next token.
         if self._in_tool_call_block:
-            # We check if the buffer has become something that is clearly NOT a tool call
-            # (e.g., if the model hallucinated and closed it incorrectly, though regex handles that)
             return None, []
 
-        # 4. No tool call in sight; flush as normal text.
         if self._buffer:
             content_to_send = self._buffer
             self._buffer = ""

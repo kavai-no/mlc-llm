@@ -1793,8 +1793,13 @@ class MLCEngine(engine_base.MLCEngineBase):
         
         # Create tool parser once for the entire request to maintain state across chunks
         parser = None
-        if use_function_calling and conversation is not None and conversation.tool_parser:
+        print(f"[DEBUG] engine.py: checking parser creation. use_function_calling={use_function_calling}, conversation_tool_parser={conversation.tool_parser if conversation else None}")
+        if conversation is not None and conversation.tool_parser is not None:
             parser = get_parser_instance(conversation.tool_parser)
+            print(f"[DEBUG] engine.py: parser created: {type(parser)}")
+        elif use_function_calling:
+            # Fallback for standard OpenAI-style function calling (JSON)
+            pass 
         
         self.state.record_event(request_id, event="invoke generate")
         for delta_outputs in self._generate(prompts, generation_cfg, request_id):
