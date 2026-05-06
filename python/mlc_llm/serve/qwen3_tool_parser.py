@@ -77,8 +77,8 @@ def _try_convert_value(value: str) -> Any:
 class Qwen3CoderToolCallParser(BaseToolParser):
     """
     Robust parser for Qwen3-Coder XML-style tool calls.
-    Uses a state-aware buffer to prevent partial tool calls from being 
-    incorrectly flushed as text.
+    Follows the pattern used in major inference engines: 
+    detecting <tool_call> blocks and parsing them with flexible regex.
     """
 
     def __init__(self):
@@ -94,19 +94,20 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         content_parts = []
         last_end = 0
 
-        pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+        # Pattern for the whole block. We use [\s\n]* to handle fragmented tags.
+        pattern = re.compile(r"<tool_call>[\s\n]*(.*?)</tool_call>", re.DOTALL)
         for match in pattern.finditer(text):
             content_parts.append(text[last_end:match.start()])
             inner = match.group(1)
             
-            func_pattern = re.compile(r"<function=(.*?)>(.*?)</function>", re.DOTALL)
+            # Pattern for function name and body, allowing whitespace/newlines inside tags
+            func_pattern = re.compile(r"<function\s*=\s*(.*?)\s*>(.*?)</function>", re.DOTALL)
             for f_match in func_pattern.finditer(inner):
                 f_name = f_match.group(1).strip()
                 f_body = f_match.group(2)
-                
                 params = {}
-                p_pattern = re.compile(r"<parameter=(.*?)>(.*?)</parameter>", re.DOTALL)
-                for p_match in p_pattern.finditer(f_body):
+                param_pattern = re.compile(r"<parameter\s*=\s*(.*?)\s*>(.*?)</parameter>", re.DOTALL)
+                for p_match in param_pattern.finditer(f_body):
                     params[p_match.group(1).strip()] = _try_convert_value(p_match.group(2))
                 
                 tool_calls.append(ChatToolCall(
@@ -125,19 +126,20 @@ class Qwen3CoderToolCallParser(BaseToolParser):
         tool_calls = []
         content_to_send = None
 
-        pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+        # 1. Check if we have a complete block in the buffer
+        pattern = re.compile(r"<tool_call>[\s\n]*(.*?)</tool_call>", re.DOTALL)
         match = pattern.search(self._buffer)
         if match:
             content_to_send = self._buffer[:match.start()]
             inner = match.group(1)
             
-            func_pattern = re.compile(r"<function=(.*?)>(.*?)</function>", re.DOTALL)
+            func_pattern = re.compile(r"<function\s*=\s*(.*?)\s*>(.*?)</function>", re.DOTALL)
             for f_match in func_pattern.finditer(inner):
                 f_name = f_match.group(1).strip()
                 f_body = f_match.group(2)
                 params = {}
-                p_pattern = re.compile(r"<parameter=(.*?)>(.*?)</parameter>", re.DOTALL)
-                for p_match in p_pattern.finditer(f_body):
+                param_pattern = re.compile(r"<parameter\s*=\s*(.*?)\s*>(.*?)</parameter>", re.DOTALL)
+                for p_match in param_pattern.finditer(f_body):
                     params[p_match.group(1).strip()] = _try_convert_value(p_match.group(2))
                 
                 tool_calls.append(ChatToolCall(
@@ -154,6 +156,7 @@ class Qwen3CoderToolCallParser(BaseToolParser):
             self._in_tool_call_block = False
             return content_to_send, tool_calls
 
+        # 2. Check if we are currently in a <tool_call> block (but not finished)
         if "<tool_call" in self._buffer:
             self._in_tool_call_block = True
             idx = self._buffer.find("<tool_call")
@@ -164,9 +167,11 @@ class Qwen3CoderToolCallParser(BaseToolParser):
             else:
                 return None, []
 
+        # 3. If we are in a tool call block but no complete match was found, do NOT flush.
         if self._in_tool_call_block:
             return None, []
 
+        # 4. No tool call in sight. Flush as normal text.
         if self._buffer:
             content_to_send = self._buffer
             self._buffer = ""

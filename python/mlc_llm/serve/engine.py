@@ -1796,9 +1796,10 @@ class MLCEngine(engine_base.MLCEngineBase):
         print(f"[DEBUG] engine.py: checking parser creation. use_function_calling={use_function_calling}, conversation_tool_parser={conversation.tool_parser if conversation else None}")
         if conversation is not None and conversation.tool_parser is not None:
             parser = get_parser_instance(conversation.tool_parser)
-            print(f"[DEBUG] engine.py: parser created: {type(parser)}")
+            print(f"[DEBUG] engine.py: parser created: {type(parser)} ID: {id(parser)}")
         elif use_function_calling:
             # Fallback for standard OpenAI-style function calling (JSON)
+            print("[DEBUG] engine.py: fallback to JSON parsing")
             pass 
         
         self.state.record_event(request_id, event="invoke generate")
